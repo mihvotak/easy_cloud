@@ -4,6 +4,7 @@
 *.log
 *.pyc
 *.swp
+.cloud_probe_account
 .buildlog/
 .history
 

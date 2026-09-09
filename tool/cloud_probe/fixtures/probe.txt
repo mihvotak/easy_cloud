@@ -1,0 +1,2 @@
+Easy Cloud protocol probe fixture.
+This file is safe to upload to the dedicated test account.
