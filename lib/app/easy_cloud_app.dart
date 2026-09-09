@@ -4,6 +4,7 @@ import '../features/auth/application/auth_repository.dart';
 import '../features/auth/presentation/auth_gate.dart';
 import '../features/browser/application/browser_repository.dart';
 import '../features/download/application/download_repository.dart';
+import '../features/offline/application/offline_file_index.dart';
 import '../features/search/application/search_repository.dart';
 
 final class EasyCloudApp extends StatelessWidget {
@@ -12,6 +13,7 @@ final class EasyCloudApp extends StatelessWidget {
     required this.browserRepository,
     required this.searchRepository,
     required this.downloadRepository,
+    required this.offlineFileIndex,
     super.key,
   });
 
@@ -19,6 +21,7 @@ final class EasyCloudApp extends StatelessWidget {
   final BrowserRepository browserRepository;
   final SearchRepository searchRepository;
   final DownloadRepository downloadRepository;
+  final OfflineFileIndex offlineFileIndex;
 
   @override
   Widget build(BuildContext context) {
@@ -80,6 +83,7 @@ final class EasyCloudApp extends StatelessWidget {
         browserRepository: browserRepository,
         searchRepository: searchRepository,
         downloadRepository: downloadRepository,
+        offlineFileIndex: offlineFileIndex,
       ),
     );
   }

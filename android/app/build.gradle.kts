@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.sungeargames.easy_cloud"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

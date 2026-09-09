@@ -6,6 +6,7 @@ import '../../browser/domain/cloud_node.dart';
 import '../../browser/presentation/browser_page.dart';
 import '../../browser/presentation/cloud_node_widgets.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../offline/application/offline_file_index.dart';
 import '../application/search_repository.dart';
 import 'search_controller.dart';
 
@@ -15,6 +16,7 @@ final class SearchPage extends StatefulWidget {
     required this.browserRepository,
     required this.authController,
     required this.downloadController,
+    required this.offlineFileIndex,
     this.path = '/',
     super.key,
   });
@@ -23,6 +25,7 @@ final class SearchPage extends StatefulWidget {
   final BrowserRepository browserRepository;
   final AuthController authController;
   final DownloadController downloadController;
+  final OfflineFileIndex offlineFileIndex;
   final String path;
 
   @override
@@ -180,6 +183,7 @@ final class _SearchPageState extends State<SearchPage> {
           repository: widget.browserRepository,
           searchRepository: widget.repository,
           downloadController: widget.downloadController,
+          offlineFileIndex: widget.offlineFileIndex,
           authController: widget.authController,
           path: path,
           title: title,

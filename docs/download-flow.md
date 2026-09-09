@@ -42,6 +42,13 @@ switch. Operations for the same account and content hash are serialized, so a
 shared `.part` cannot be truncated or committed concurrently. An existing final
 object is accepted only after size and Mail.ru cloud-hash verification.
 
+Verified objects are registered in `cloud_cache/offline_file_index.sqlite`.
+The index stores only the account hash, normalized remote path, display name,
+cloud hash, size, revisions and timestamps. It never stores raw email addresses,
+OAuth credentials or local object paths. Records are written after a verified
+cache hit or atomic commit and are shown in the account-scoped «Офлайн-файлы»
+screen.
+
 ## Resume experiment
 
 The binary transport resumes a useful `.part` with HTTP `Range`. Probe command

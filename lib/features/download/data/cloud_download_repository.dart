@@ -9,6 +9,7 @@ import '../../../features/auth/domain/cloud_session.dart';
 import '../../../features/browser/domain/cloud_node.dart';
 import '../../../local/cache/application_cache_root.dart';
 import '../../../local/cache/content_addressed_file_cache.dart';
+import '../../offline/application/offline_file_index.dart';
 import '../application/download_repository.dart';
 import '../domain/download.dart';
 
@@ -19,12 +20,14 @@ final class CloudDownloadRepository implements DownloadRepository {
     required CloudMailApi api,
     required DownloadTransport transport,
     required AuthRepository authRepository,
+    required OfflineFileIndex offlineFileIndex,
     DownloadCacheFactory? cacheFactory,
     Directory? cacheRoot,
     CacheRootProvider? rootProvider,
   }) : _api = api,
        _transport = transport,
        _authRepository = authRepository,
+       _offlineFileIndex = offlineFileIndex,
        _cacheFactory =
            cacheFactory ??
            ((email) => ContentAddressedFileCache(
@@ -42,6 +45,7 @@ final class CloudDownloadRepository implements DownloadRepository {
   final CloudMailApi _api;
   final DownloadTransport _transport;
   final AuthRepository _authRepository;
+  final OfflineFileIndex _offlineFileIndex;
   final DownloadCacheFactory _cacheFactory;
 
   bool _closed = false;
@@ -57,6 +61,7 @@ final class CloudDownloadRepository implements DownloadRepository {
       api: _api,
       transport: _transport,
       authRepository: _authRepository,
+      offlineFileIndex: _offlineFileIndex,
       cacheFactory: _cacheFactory,
       coordinator: _coordinator,
       onFinished: () => _active.remove(operation),
@@ -83,6 +88,7 @@ final class _DownloadOperation {
     required this.api,
     required this.transport,
     required this.authRepository,
+    required this.offlineFileIndex,
     required this.cacheFactory,
     required this.coordinator,
     required this.onFinished,
@@ -98,6 +104,7 @@ final class _DownloadOperation {
   final CloudMailApi api;
   final DownloadTransport transport;
   final AuthRepository authRepository;
+  final OfflineFileIndex offlineFileIndex;
   final DownloadCacheFactory cacheFactory;
   final _DownloadCoordinator coordinator;
   final void Function() onFinished;
@@ -159,6 +166,7 @@ final class _DownloadOperation {
           final cachedHash = await calculateCloudFileHash(cached);
           cancellation.throwIfCancelled();
           if (_sameHash(cachedHash, metadata.hash)) {
+            await _indexFile(scope, freshNode, metadata);
             _emit(
               DownloadProgress(
                 phase: DownloadPhase.committed,
@@ -259,6 +267,7 @@ final class _DownloadOperation {
         cancellation.throwIfCancelled();
         _ensureSession(scope);
         final object = await cache.objectFile(metadata.hash);
+        await _indexFile(scope, freshNode, metadata);
         _emit(
           DownloadProgress(
             phase: DownloadPhase.committed,
@@ -326,6 +335,30 @@ final class _DownloadOperation {
             scope.session.email.trim().toLowerCase()) {
       throw const DownloadCancelled();
     }
+  }
+
+  Future<void> _indexFile(
+    _DownloadSessionScope scope,
+    CloudNode freshNode,
+    _DownloadMetadata metadata,
+  ) async {
+    cancellation.throwIfCancelled();
+    _ensureSession(scope);
+    await offlineFileIndex.upsert(
+      scope.session.email,
+      OfflineFileRecord(
+        path: freshNode.path,
+        name: freshNode.name,
+        hash: metadata.hash,
+        size: metadata.size,
+        modifiedAt: freshNode.modifiedAt,
+        revision: freshNode.revision,
+        globalRevision: freshNode.globalRevision,
+        cachedAt: DateTime.now().toUtc(),
+      ),
+    );
+    cancellation.throwIfCancelled();
+    _ensureSession(scope);
   }
 
   String _normalizePath(String path) {

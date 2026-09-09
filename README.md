@@ -15,6 +15,7 @@ Implemented:
 - server-side name search in the current folder with navigation from results;
 - resumable streaming downloads with progress, cancellation, integrity checks,
   and an account-isolated content-addressed offline cache;
+- persistent account-isolated offline metadata and an offline-files screen;
 - sanitized protocol probe and live contract documentation under `docs/`.
 
 The normal Mail.ru account password is not supported. Create an application

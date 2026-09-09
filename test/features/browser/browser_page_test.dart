@@ -15,6 +15,7 @@ import 'package:easy_cloud/features/download/application/download_repository.dar
 import 'package:easy_cloud/features/download/domain/download_handle.dart';
 import 'package:easy_cloud/features/download/domain/download_progress.dart';
 import 'package:easy_cloud/features/download/presentation/download_controller.dart';
+import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,6 +33,7 @@ void main() {
           repository: repository,
           searchRepository: _NoopSearchRepository(),
           downloadController: downloads,
+          offlineFileIndex: _NoopOfflineFileIndex(),
           authController: auth,
         ),
       ),
@@ -67,6 +69,7 @@ void main() {
           repository: repository,
           searchRepository: _NoopSearchRepository(),
           downloadController: downloads,
+          offlineFileIndex: _NoopOfflineFileIndex(),
           authController: auth,
         ),
       ),
@@ -102,6 +105,48 @@ void main() {
     downloads.dispose();
     auth.dispose();
   });
+
+  testWidgets('opens the offline files for the signed-in account', (
+    tester,
+  ) async {
+    final store = MemorySessionStore()
+      ..session = CloudSession(
+        email: 'reader@mail.ru',
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        csrfToken: 'csrf',
+        expiresAt: DateTime.now().add(const Duration(hours: 1)),
+      );
+    final auth = AuthController(
+      AuthRepository(api: _NoopAuthApi(), store: store),
+    );
+    await auth.initialize();
+    final downloads = DownloadController(_NoopDownloadRepository());
+    final offline = _NoopOfflineFileIndex();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BrowserPage(
+          repository: _TreeRepository(),
+          searchRepository: _NoopSearchRepository(),
+          downloadController: downloads,
+          offlineFileIndex: offline,
+          authController: auth,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Офлайн-файлы'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Офлайн-файлы'), findsOneWidget);
+    expect(find.text('Нет офлайн-файлов'), findsOneWidget);
+    expect(offline.listedEmails, ['reader@mail.ru']);
+
+    await tester.pumpWidget(const SizedBox());
+    downloads.dispose();
+    auth.dispose();
+  });
 }
 
 final class _NoopDownloadRepository implements DownloadRepository {
@@ -110,6 +155,28 @@ final class _NoopDownloadRepository implements DownloadRepository {
 
   @override
   void close() {}
+}
+
+final class _NoopOfflineFileIndex implements OfflineFileIndex {
+  final listedEmails = <String>[];
+
+  @override
+  Future<void> upsert(String email, OfflineFileRecord record) async {}
+
+  @override
+  Future<List<OfflineFileRecord>> list(String email) async {
+    listedEmails.add(email);
+    return const [];
+  }
+
+  @override
+  Future<void> remove(String email, String path) async {}
+
+  @override
+  Future<void> clearAccount(String email) async {}
+
+  @override
+  Future<void> close() async {}
 }
 
 final class _ControllableDownloadRepository implements DownloadRepository {

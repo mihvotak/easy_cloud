@@ -12,6 +12,7 @@ import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
 import 'package:easy_cloud/features/download/application/download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download_handle.dart';
 import 'package:easy_cloud/features/download/presentation/download_controller.dart';
+import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:easy_cloud/features/search/presentation/search_page.dart';
 import 'package:flutter/material.dart';
@@ -31,6 +32,7 @@ void main() {
           browserRepository: dependencies.browserRepository,
           authController: dependencies.authController,
           downloadController: dependencies.downloadController,
+          offlineFileIndex: dependencies.offlineFileIndex,
         ),
       ),
     );
@@ -91,6 +93,7 @@ void main() {
           browserRepository: dependencies.browserRepository,
           authController: dependencies.authController,
           downloadController: dependencies.downloadController,
+          offlineFileIndex: dependencies.offlineFileIndex,
         ),
       ),
     );
@@ -160,16 +163,35 @@ final class _Dependencies {
       authController = AuthController(
         AuthRepository(api: _NoopAuthApi(), store: MemorySessionStore()),
       ),
-      downloadController = DownloadController(_NoopDownloadRepository());
+      downloadController = DownloadController(_NoopDownloadRepository()),
+      offlineFileIndex = _NoopOfflineFileIndex();
 
   final _BrowserRepository browserRepository;
   final AuthController authController;
   final DownloadController downloadController;
+  final OfflineFileIndex offlineFileIndex;
 
   void dispose() {
     downloadController.dispose();
     authController.dispose();
   }
+}
+
+final class _NoopOfflineFileIndex implements OfflineFileIndex {
+  @override
+  Future<void> upsert(String email, OfflineFileRecord record) async {}
+
+  @override
+  Future<List<OfflineFileRecord>> list(String email) async => const [];
+
+  @override
+  Future<void> remove(String email, String path) async {}
+
+  @override
+  Future<void> clearAccount(String email) async {}
+
+  @override
+  Future<void> close() async {}
 }
 
 final class _NoopDownloadRepository implements DownloadRepository {

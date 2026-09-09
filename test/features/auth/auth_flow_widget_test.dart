@@ -9,6 +9,7 @@ import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
 import 'package:easy_cloud/features/download/application/download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download_handle.dart';
+import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +26,7 @@ void main() {
         browserRepository: _EmptyBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: _NoopDownloadRepository(),
+        offlineFileIndex: _NoopOfflineFileIndex(),
       ),
     );
     await tester.pumpAndSettle();
@@ -56,6 +58,7 @@ void main() {
         browserRepository: _EmptyBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: _NoopDownloadRepository(),
+        offlineFileIndex: _NoopOfflineFileIndex(),
       ),
     );
     await tester.pumpAndSettle();
@@ -73,6 +76,7 @@ void main() {
         browserRepository: _TreeBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: _NoopDownloadRepository(),
+        offlineFileIndex: _NoopOfflineFileIndex(),
       ),
     );
     await tester.pumpAndSettle();
@@ -186,4 +190,21 @@ final class _NoopDownloadRepository implements DownloadRepository {
 
   @override
   void close() {}
+}
+
+final class _NoopOfflineFileIndex implements OfflineFileIndex {
+  @override
+  Future<void> upsert(String email, OfflineFileRecord record) async {}
+
+  @override
+  Future<List<OfflineFileRecord>> list(String email) async => const [];
+
+  @override
+  Future<void> remove(String email, String path) async {}
+
+  @override
+  Future<void> clearAccount(String email) async {}
+
+  @override
+  Future<void> close() async {}
 }

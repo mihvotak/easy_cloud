@@ -12,20 +12,31 @@ import 'package:easy_cloud/features/auth/domain/cloud_session.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/download/data/cloud_download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download.dart';
+import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/local/cache/content_addressed_file_cache.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('downloads, verifies, commits, and reports ordered phases', () async {
+  test('downloads, verifies, indexes, and reports ordered phases', () async {
     final payload = utf8.encode('fresh download');
     final hash = calculateCloudHash(payload);
+    final modifiedAt = DateTime.utc(2025, 2, 3, 4, 5, 6);
     final root = await Directory.systemTemp.createTemp('easy-cloud-download');
     addTearDown(() => root.delete(recursive: true));
 
-    final auth = await _authenticatedRepository();
+    final index = _MemoryOfflineFileIndex();
+    final auth = await _authenticatedRepository(email: ' Test@Mail.RU ');
     addTearDown(auth.close);
     final statTransport = _StatTransport([
-      _file('/stale.txt', payload.length, hash),
+      _file(
+        '/stale.txt',
+        payload.length,
+        ' ${hash.toLowerCase()} ',
+        name: 'fresh-name.txt',
+        modifiedAt: modifiedAt,
+        revision: 'revision-2',
+        globalRevision: 'global-revision-2',
+      ),
     ]);
     final downloadTransport = _DownloadTransport(payload);
     final repository = _repository(
@@ -33,10 +44,12 @@ void main() {
       auth: auth,
       statTransport: statTransport,
       downloadTransport: downloadTransport,
+      index: index,
     );
     addTearDown(repository.close);
 
     final events = <DownloadProgress>[];
+    final indexedAtBefore = DateTime.now().toUtc();
     final handle = repository.start(
       const CloudNode(
         path: '/stale.txt',
@@ -49,6 +62,7 @@ void main() {
     final subscription = handle.progress.listen(events.add);
     final result = await handle.result;
     await subscription.cancel();
+    final indexedAtAfter = DateTime.now().toUtc();
 
     expect(await result.readAsBytes(), payload);
     expect(events.map((event) => event.phase), [
@@ -63,6 +77,31 @@ void main() {
     expect(downloadTransport.lastRequest?.expectedSize, payload.length);
     expect(downloadTransport.lastRequest?.remotePath, '/stale.txt');
     expect(result.path, isNot(endsWith('.part')));
+
+    final records = await index.list(' TEST@MAIL.RU ');
+    expect(index.upsertCalls, 1);
+    expect(index.records.keys, contains('test@mail.ru:/stale.txt'));
+    expect(records, hasLength(1));
+    final record = records.single;
+    expect(record.path, '/stale.txt');
+    expect(record.name, 'fresh-name.txt');
+    expect(record.hash, hash);
+    expect(record.size, payload.length);
+    expect(record.modifiedAt?.isAtSameMomentAs(modifiedAt), isTrue);
+    expect(record.modifiedAt?.isUtc, isTrue);
+    expect(record.revision, 'revision-2');
+    expect(record.globalRevision, 'global-revision-2');
+    expect(record.cachedAt.isUtc, isTrue);
+    expect(
+      record.cachedAt.isAfter(
+        indexedAtBefore.subtract(const Duration(seconds: 1)),
+      ),
+      isTrue,
+    );
+    expect(
+      record.cachedAt.isBefore(indexedAtAfter.add(const Duration(seconds: 1))),
+      isTrue,
+    );
   });
 
   test(
@@ -86,11 +125,13 @@ void main() {
         _file('/cached.txt', payload.length, hash),
       ]);
       final downloadTransport = _DownloadTransport(const []);
+      final index = _MemoryOfflineFileIndex();
       final repository = _repository(
         root: root,
         auth: auth,
         statTransport: statTransport,
         downloadTransport: downloadTransport,
+        index: index,
       );
       addTearDown(repository.close);
 
@@ -108,6 +149,13 @@ void main() {
         DownloadPhase.committed,
       ]);
       expect(events.last.cacheHit, isTrue);
+      final records = await index.list('test@mail.ru');
+      expect(index.upsertCalls, 1);
+      expect(records, hasLength(1));
+      expect(records.single.path, '/cached.txt');
+      expect(records.single.name, 'cached.txt');
+      expect(records.single.hash, hash);
+      expect(records.single.size, payload.length);
     },
   );
 
@@ -159,6 +207,7 @@ void main() {
         api: CloudMailApi(statTransport),
         transport: downloadTransport,
         authRepository: auth,
+        offlineFileIndex: _MemoryOfflineFileIndex(),
         cacheFactory: (email) {
           factoryEmails.add(email);
           return ContentAddressedFileCache(root: root, email: email);
@@ -234,11 +283,13 @@ void main() {
     final auth = await _authenticatedRepository();
     addTearDown(auth.close);
     final cache = ContentAddressedFileCache(root: root, email: 'test@mail.ru');
+    final index = _MemoryOfflineFileIndex();
     final repository = _repository(
       root: root,
       auth: auth,
       statTransport: _StatTransport([_file('/bad.txt', expected.length, hash)]),
       downloadTransport: _DownloadTransport(actual),
+      index: index,
     );
     addTearDown(repository.close);
 
@@ -257,7 +308,118 @@ void main() {
     final paths = await cache.paths(hash);
     expect(await paths.objectFile.exists(), isFalse);
     expect(await paths.partFile.exists(), isFalse);
+    expect(index.upsertCalls, 0);
+    expect(index.records, isEmpty);
   });
+
+  test(
+    'size mismatch is typed and does not update the offline index',
+    () async {
+      final expected = utf8.encode('expected size');
+      final actual = utf8.encode('short');
+      final hash = calculateCloudHash(expected);
+      final root = await Directory.systemTemp.createTemp('easy-cloud-download');
+      addTearDown(() => root.delete(recursive: true));
+      final auth = await _authenticatedRepository();
+      addTearDown(auth.close);
+      final cache = ContentAddressedFileCache(
+        root: root,
+        email: 'test@mail.ru',
+      );
+      final index = _MemoryOfflineFileIndex();
+      final repository = _repository(
+        root: root,
+        auth: auth,
+        statTransport: _StatTransport([
+          _file('/bad-size.txt', expected.length, hash),
+        ]),
+        downloadTransport: _DownloadTransport(actual),
+        index: index,
+      );
+      addTearDown(repository.close);
+
+      final handle = repository.start(_node('/bad-size.txt'));
+      await expectLater(
+        handle.result,
+        throwsA(
+          isA<DownloadIntegrityFailure>()
+              .having(
+                (failure) => failure.type,
+                'type',
+                DownloadFailureType.integrity,
+              )
+              .having(
+                (failure) => failure.actualSize,
+                'actualSize',
+                actual.length,
+              ),
+        ),
+      );
+
+      final paths = await cache.paths(hash);
+      expect(await paths.objectFile.exists(), isFalse);
+      expect(await paths.partFile.exists(), isFalse);
+      expect(index.upsertCalls, 0);
+      expect(index.records, isEmpty);
+    },
+  );
+
+  test(
+    'index failure preserves the verified object and retry uses a cache hit',
+    () async {
+      final payload = utf8.encode('recoverable index failure');
+      final hash = calculateCloudHash(payload);
+      final root = await Directory.systemTemp.createTemp('easy-cloud-download');
+      addTearDown(() => root.delete(recursive: true));
+      final auth = await _authenticatedRepository();
+      addTearDown(auth.close);
+      final indexFailure = StateError('offline index unavailable');
+      final index = _MemoryOfflineFileIndex()..nextUpsertFailure = indexFailure;
+      final statTransport = _StatTransport([
+        _file('/retry.txt', payload.length, hash),
+        _file('/retry.txt', payload.length, hash),
+      ]);
+      final downloadTransport = _DownloadTransport(payload);
+      final repository = _repository(
+        root: root,
+        auth: auth,
+        statTransport: statTransport,
+        downloadTransport: downloadTransport,
+        index: index,
+      );
+      addTearDown(repository.close);
+
+      final first = repository.start(_node('/retry.txt'));
+      await expectLater(first.result, throwsA(same(indexFailure)));
+
+      final cache = ContentAddressedFileCache(
+        root: root,
+        email: 'test@mail.ru',
+      );
+      final object = await cache.objectFile(hash);
+      expect(await object.exists(), isTrue);
+      expect(await object.readAsBytes(), payload);
+      expect(index.upsertCalls, 1);
+      expect(index.records, isEmpty);
+
+      final retryEvents = <DownloadProgress>[];
+      final retry = repository.start(_node('/retry.txt'));
+      final subscription = retry.progress.listen(retryEvents.add);
+      final result = await retry.result;
+      await subscription.cancel();
+
+      expect(result.path, object.path);
+      expect(await result.readAsBytes(), payload);
+      expect(downloadTransport.calls, 1);
+      expect(retryEvents.map((event) => event.phase), [
+        DownloadPhase.resolving,
+        DownloadPhase.committed,
+      ]);
+      expect(retryEvents.last.cacheHit, isTrue);
+      expect(index.upsertCalls, 2);
+      expect(await index.list('test@mail.ru'), hasLength(1));
+    },
+  );
 
   test('cancellation completes with typed failure', () async {
     final payload = utf8.encode('will not finish');
@@ -389,12 +551,50 @@ CloudDownloadRepository _repository({
   required AuthRepository auth,
   required _StatTransport statTransport,
   required _DownloadTransport downloadTransport,
+  _MemoryOfflineFileIndex? index,
 }) => CloudDownloadRepository(
   api: CloudMailApi(statTransport),
   transport: downloadTransport,
   authRepository: auth,
+  offlineFileIndex: index ?? _MemoryOfflineFileIndex(),
   cacheRoot: root,
 );
+
+final class _MemoryOfflineFileIndex implements OfflineFileIndex {
+  final records = <String, OfflineFileRecord>{};
+  int upsertCalls = 0;
+  Object? nextUpsertFailure;
+
+  @override
+  Future<void> upsert(String email, OfflineFileRecord record) async {
+    upsertCalls++;
+    final failure = nextUpsertFailure;
+    nextUpsertFailure = null;
+    if (failure != null) throw failure;
+    records['${email.trim().toLowerCase()}:${record.path}'] = record;
+  }
+
+  @override
+  Future<List<OfflineFileRecord>> list(String email) async => records.entries
+      .where((entry) => entry.key.startsWith('${email.trim().toLowerCase()}:'))
+      .map((entry) => entry.value)
+      .toList(growable: false);
+
+  @override
+  Future<void> remove(String email, String path) async {
+    records.remove('${email.trim().toLowerCase()}:$path');
+  }
+
+  @override
+  Future<void> clearAccount(String email) async {
+    records.removeWhere(
+      (key, _) => key.startsWith('${email.trim().toLowerCase()}:'),
+    );
+  }
+
+  @override
+  Future<void> close() async {}
+}
 
 CloudNode _node(String path) => CloudNode(
   path: path,
@@ -402,23 +602,36 @@ CloudNode _node(String path) => CloudNode(
   type: CloudNodeType.file,
 );
 
-CloudNode _file(String path, int size, String hash) => CloudNode(
+CloudNode _file(
+  String path,
+  int size,
+  String hash, {
+  String? name,
+  DateTime? modifiedAt,
+  String? revision,
+  String? globalRevision,
+}) => CloudNode(
   path: path,
-  name: path.substring(path.lastIndexOf('/') + 1),
+  name: name ?? path.substring(path.lastIndexOf('/') + 1),
   type: CloudNodeType.file,
   size: size,
+  modifiedAt: modifiedAt,
   hash: hash,
+  revision: revision,
+  globalRevision: globalRevision,
 );
 
-Future<AuthRepository> _authenticatedRepository() async {
-  final store = MemorySessionStore()..session = _session();
+Future<AuthRepository> _authenticatedRepository({
+  String email = 'test@mail.ru',
+}) async {
+  final store = MemorySessionStore()..session = _session(email: email);
   final repository = AuthRepository(api: _AuthApi(), store: store);
   await repository.restore();
   return repository;
 }
 
-CloudSession _session() => CloudSession(
-  email: 'test@mail.ru',
+CloudSession _session({String email = 'test@mail.ru'}) => CloudSession(
+  email: email,
   accessToken: 'access',
   refreshToken: 'refresh',
   csrfToken: 'csrf',
@@ -430,7 +643,7 @@ final class _AuthApi implements AuthApi {
   Future<CloudSession> login({
     required String email,
     required String password,
-  }) async => _session();
+  }) async => _session(email: email);
 
   @override
   Future<CloudSession> refresh(CloudSession session) async => session;
@@ -457,20 +670,21 @@ final class _StatTransport implements CloudTransport {
     expect(includeCsrfQuery, isFalse);
     paths.add(query['home']!);
     final node = nodes[calls++];
+    final body = <String, Object?>{
+      'home': node.path,
+      'name': node.name,
+      'type': 'file',
+      'size': node.size,
+      'hash': node.hash,
+    };
+    if (node.modifiedAt != null) {
+      body['mtime'] = node.modifiedAt!.toUtc().millisecondsSinceEpoch ~/ 1000;
+    }
+    if (node.revision != null) body['rev'] = node.revision;
+    if (node.globalRevision != null) body['grev'] = node.globalRevision;
     return CloudResponse(
       statusCode: 200,
-      bytes: utf8.encode(
-        jsonEncode({
-          'status': 200,
-          'body': {
-            'home': node.path,
-            'name': node.name,
-            'type': 'file',
-            'size': node.size,
-            'hash': node.hash,
-          },
-        }),
-      ),
+      bytes: utf8.encode(jsonEncode({'status': 200, 'body': body})),
     );
   }
 

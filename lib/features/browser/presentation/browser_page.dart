@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../auth/presentation/auth_controller.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../offline/application/offline_file_index.dart';
+import '../../offline/presentation/offline_files_page.dart';
 import '../../search/application/search_repository.dart';
 import '../../search/presentation/search_page.dart';
 import '../application/browser_repository.dart';
@@ -15,6 +17,7 @@ final class BrowserPage extends StatefulWidget {
     required this.repository,
     required this.searchRepository,
     required this.downloadController,
+    required this.offlineFileIndex,
     required this.authController,
     this.path = '/',
     this.title,
@@ -24,6 +27,7 @@ final class BrowserPage extends StatefulWidget {
   final BrowserRepository repository;
   final SearchRepository searchRepository;
   final DownloadController downloadController;
+  final OfflineFileIndex offlineFileIndex;
   final AuthController authController;
   final String path;
   final String? title;
@@ -73,6 +77,11 @@ final class _BrowserPageState extends State<BrowserPage> {
       appBar: AppBar(
         title: Text(widget.title ?? _controller.folder?.name ?? 'Easy Cloud'),
         actions: [
+          IconButton(
+            tooltip: 'Офлайн-файлы',
+            onPressed: _openOfflineFiles,
+            icon: const Icon(Icons.offline_pin_rounded),
+          ),
           IconButton(
             tooltip: 'Поиск',
             onPressed: _openSearch,
@@ -184,6 +193,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           repository: widget.repository,
           searchRepository: widget.searchRepository,
           downloadController: widget.downloadController,
+          offlineFileIndex: widget.offlineFileIndex,
           authController: widget.authController,
           path: folder.path,
           title: folder.name,
@@ -199,9 +209,21 @@ final class _BrowserPageState extends State<BrowserPage> {
           repository: widget.searchRepository,
           browserRepository: widget.repository,
           downloadController: widget.downloadController,
+          offlineFileIndex: widget.offlineFileIndex,
           authController: widget.authController,
           path: widget.path,
         ),
+      ),
+    );
+  }
+
+  void _openOfflineFiles() {
+    final email = widget.authController.session?.email;
+    if (email == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            OfflineFilesPage(index: widget.offlineFileIndex, email: email),
       ),
     );
   }

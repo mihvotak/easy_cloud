@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../application/auth_repository.dart';
@@ -5,6 +7,7 @@ import '../../browser/application/browser_repository.dart';
 import '../../browser/presentation/browser_page.dart';
 import '../../download/application/download_repository.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../offline/application/offline_file_index.dart';
 import '../../search/application/search_repository.dart';
 import 'auth_controller.dart';
 import 'login_page.dart';
@@ -15,6 +18,7 @@ final class AuthGate extends StatefulWidget {
     required this.browserRepository,
     required this.searchRepository,
     required this.downloadRepository,
+    required this.offlineFileIndex,
     super.key,
   });
 
@@ -22,6 +26,7 @@ final class AuthGate extends StatefulWidget {
   final BrowserRepository browserRepository;
   final SearchRepository searchRepository;
   final DownloadRepository downloadRepository;
+  final OfflineFileIndex offlineFileIndex;
 
   @override
   State<AuthGate> createState() => _AuthGateState();
@@ -61,6 +66,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _controller.removeListener(_onAuthChanged);
     _downloadController.dispose();
+    unawaited(widget.offlineFileIndex.close());
     widget.browserRepository.close();
     _controller.dispose();
     super.dispose();
@@ -76,6 +82,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         repository: widget.browserRepository,
         searchRepository: widget.searchRepository,
         downloadController: _downloadController,
+        offlineFileIndex: widget.offlineFileIndex,
         authController: _controller,
       ),
     },
