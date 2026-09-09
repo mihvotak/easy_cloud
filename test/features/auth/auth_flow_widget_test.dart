@@ -3,6 +3,10 @@ import 'package:easy_cloud/features/auth/application/auth_repository.dart';
 import 'package:easy_cloud/features/auth/data/cloud_auth_api.dart';
 import 'package:easy_cloud/features/auth/data/session_store.dart';
 import 'package:easy_cloud/features/auth/domain/cloud_session.dart';
+import 'package:easy_cloud/features/browser/application/browser_repository.dart';
+import 'package:easy_cloud/features/browser/domain/cloud_folder_page.dart';
+import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
+import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -12,7 +16,12 @@ void main() {
       api: _WidgetAuthApi(),
       store: MemorySessionStore(),
     );
-    await tester.pumpWidget(EasyCloudApp(authRepository: repository));
+    await tester.pumpWidget(
+      EasyCloudApp(
+        authRepository: repository,
+        browserRepository: _EmptyBrowserRepository(),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Ваше облако.\nБез лишнего.'), findsOneWidget);
@@ -28,8 +37,7 @@ void main() {
     await tester.tap(find.text('Подключить облако'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Облако подключено'), findsOneWidget);
-    expect(find.text('test@mail.ru'), findsOneWidget);
+    expect(find.text('Папка пуста'), findsOneWidget);
   });
 
   testWidgets('restores an existing session without showing login', (
@@ -40,12 +48,37 @@ void main() {
     await tester.pumpWidget(
       EasyCloudApp(
         authRepository: AuthRepository(api: _WidgetAuthApi(), store: store),
+        browserRepository: _EmptyBrowserRepository(),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Облако подключено'), findsOneWidget);
+    expect(find.text('Папка пуста'), findsOneWidget);
     expect(find.text('Подключить облако'), findsNothing);
+  });
+
+  testWidgets('logout from a nested folder returns to login', (tester) async {
+    final store = MemorySessionStore()
+      ..session = _session(DateTime.now().add(const Duration(hours: 1)));
+    await tester.pumpWidget(
+      EasyCloudApp(
+        authRepository: AuthRepository(api: _WidgetAuthApi(), store: store),
+        browserRepository: _TreeBrowserRepository(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Documents'));
+    await tester.pumpAndSettle();
+    expect(find.text('private.txt'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Аккаунт'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Выйти'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Подключить облако'), findsOneWidget);
+    expect(find.text('private.txt'), findsNothing);
   });
 }
 
@@ -66,6 +99,64 @@ final class _WidgetAuthApi implements AuthApi {
 
   @override
   Future<CloudSession> refresh(CloudSession session) async => session;
+
+  @override
+  void close() {}
+}
+
+final class _EmptyBrowserRepository implements BrowserRepository {
+  @override
+  Future<CloudFolderPage> listFolder(
+    String path, {
+    int offset = 0,
+    int limit = 100,
+    CloudSort sort = CloudSort.nameAscending,
+  }) async => CloudFolderPage(
+    folder: const CloudNode(
+      path: '/',
+      name: 'Облако',
+      type: CloudNodeType.folder,
+    ),
+    items: const [],
+    totalCount: 0,
+    sort: sort,
+  );
+
+  @override
+  void close() {}
+}
+
+final class _TreeBrowserRepository implements BrowserRepository {
+  @override
+  Future<CloudFolderPage> listFolder(
+    String path, {
+    int offset = 0,
+    int limit = 100,
+    CloudSort sort = CloudSort.nameAscending,
+  }) async => CloudFolderPage(
+    folder: CloudNode(
+      path: path,
+      name: path == '/' ? 'Облако' : 'Documents',
+      type: CloudNodeType.folder,
+    ),
+    items: path == '/'
+        ? const [
+            CloudNode(
+              path: '/Documents',
+              name: 'Documents',
+              type: CloudNodeType.folder,
+            ),
+          ]
+        : const [
+            CloudNode(
+              path: '/Documents/private.txt',
+              name: 'private.txt',
+              type: CloudNodeType.file,
+            ),
+          ],
+    totalCount: 1,
+    sort: sort,
+  );
 
   @override
   void close() {}

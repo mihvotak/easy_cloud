@@ -11,6 +11,7 @@ dart run tool/cloud_probe/cloud_probe.dart login
 dart run tool/cloud_probe/cloud_probe.dart suite
 dart run tool/cloud_probe/cloud_probe.dart root
 dart run tool/cloud_probe/cloud_probe.dart stat /Documents/example.txt
+dart run tool/cloud_probe/cloud_probe.dart sort-matrix
 ```
 
 Credentials can be entered interactively. For local automation, use environment
@@ -59,6 +60,13 @@ Search is a legacy experiment:
 
 ```bash
 dart run tool/cloud_probe/cloud_probe.dart search report --path /Documents
+```
+
+Folder sorting can be checked without modifying cloud content:
+
+```bash
+dart run tool/cloud_probe/cloud_probe.dart sort-matrix --path /
+dart run tool/cloud_probe/cloud_probe.dart root --sort mtime --order desc
 ```
 
 Upload modifies the test account and requires an explicit confirmation flag:

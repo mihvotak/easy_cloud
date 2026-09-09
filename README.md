@@ -9,6 +9,9 @@ Implemented:
 - CSRF acquisition and refresh-token rotation;
 - encrypted session storage backed by Android Keystore;
 - session restoration, serialized refresh, and logout;
+- folder navigation with Android back handling and pull-to-refresh;
+- server-side sorting by name, size, or modification time;
+- paginated listings and file/folder metadata;
 - sanitized protocol probe and live contract documentation under `docs/`.
 
 The normal Mail.ru account password is not supported. Create an application

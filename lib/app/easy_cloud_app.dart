@@ -2,11 +2,17 @@ import 'package:flutter/material.dart';
 
 import '../features/auth/application/auth_repository.dart';
 import '../features/auth/presentation/auth_gate.dart';
+import '../features/browser/application/browser_repository.dart';
 
 final class EasyCloudApp extends StatelessWidget {
-  const EasyCloudApp({required this.authRepository, super.key});
+  const EasyCloudApp({
+    required this.authRepository,
+    required this.browserRepository,
+    super.key,
+  });
 
   final AuthRepository authRepository;
+  final BrowserRepository browserRepository;
 
   @override
   Widget build(BuildContext context) {
@@ -63,7 +69,10 @@ final class EasyCloudApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: AuthGate(repository: authRepository),
+      home: AuthGate(
+        repository: authRepository,
+        browserRepository: browserRepository,
+      ),
     );
   }
 }

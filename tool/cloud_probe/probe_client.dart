@@ -162,6 +162,8 @@ final class CloudProbeClient {
     String path, {
     int offset = 0,
     int limit = 100,
+    String sortType = 'name',
+    String sortOrder = 'asc',
   }) => _apiRequest(
     session,
     'GET',
@@ -170,9 +172,51 @@ final class CloudProbeClient {
       'home': _cloudPath(path),
       'offset': '$offset',
       'limit': '$limit',
-      'sort': '{"type":"name","order":"asc"}',
+      'sort': jsonEncode({'type': sortType, 'order': sortOrder}),
     },
   );
+
+  Future<void> probeSortMatrix(
+    OAuthSession session,
+    String path, {
+    int limit = 100,
+  }) async {
+    for (final sortType in const ['name', 'size', 'mtime']) {
+      for (final sortOrder in const ['asc', 'desc']) {
+        stdout.writeln('\n=== sort $sortType/$sortOrder ===');
+        final response = await listFolder(
+          session,
+          path,
+          limit: limit,
+          sortType: sortType,
+          sortOrder: sortOrder,
+        );
+        final envelope = _jsonObject(response, operation: 'sort matrix');
+        final body = envelope['body'];
+        if (body is! Map) {
+          throw ProbeException('Folder response body is not an object.');
+        }
+        final sort = body['sort'];
+        final list = body['list'];
+        if (sort is! Map || list is! List) {
+          throw ProbeException(
+            'Folder response omitted body.sort or body.list.',
+          );
+        }
+        final appliedType = sort['type'];
+        final appliedOrder = sort['order'];
+        if (appliedType != sortType || appliedOrder != sortOrder) {
+          throw ProbeException(
+            'Server applied ${_safeSortValue(appliedType)}/${_safeSortValue(appliedOrder)} '
+            'instead of $sortType/$sortOrder.',
+          );
+        }
+        stdout.writeln(
+          'sort confirmed: $appliedType/$appliedOrder, page items=${list.length}',
+        );
+      }
+    }
+  }
 
   Future<ProbeResponse> stat(OAuthSession session, String path) =>
       _apiRequest(session, 'GET', 'file', query: {'home': _cloudPath(path)});
@@ -554,4 +598,9 @@ int? _asInt(Object? value) => switch (value) {
 String _safeOAuthError(Object? value) {
   final error = value?.toString() ?? '';
   return RegExp(r'^[a-zA-Z0-9_./-]{1,64}$').hasMatch(error) ? error : 'unknown';
+}
+
+String _safeSortValue(Object? value) {
+  final text = value?.toString() ?? '';
+  return RegExp(r'^[a-z]+$').hasMatch(text) ? text : 'unknown';
 }

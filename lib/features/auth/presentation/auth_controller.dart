@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../application/auth_repository.dart';
@@ -7,9 +9,12 @@ import '../domain/cloud_session.dart';
 enum AuthStatus { loading, signedOut, signedIn }
 
 final class AuthController extends ChangeNotifier {
-  AuthController(this._repository);
+  AuthController(this._repository) {
+    _sessionSubscription = _repository.sessionChanges.listen(_onSessionChanged);
+  }
 
   final AuthRepository _repository;
+  late final StreamSubscription<CloudSession?> _sessionSubscription;
 
   AuthStatus status = AuthStatus.loading;
   CloudSession? session;
@@ -25,6 +30,9 @@ final class AuthController extends ChangeNotifier {
     } on AuthFailure catch (failure) {
       status = AuthStatus.signedOut;
       errorMessage = failure.message;
+    } catch (_) {
+      status = AuthStatus.signedOut;
+      errorMessage = 'Не удалось восстановить сессию.';
     }
     notifyListeners();
   }
@@ -89,8 +97,15 @@ final class AuthController extends ChangeNotifier {
     }
   }
 
+  void _onSessionChanged(CloudSession? value) {
+    session = value;
+    status = value == null ? AuthStatus.signedOut : AuthStatus.signedIn;
+    notifyListeners();
+  }
+
   @override
   void dispose() {
+    _sessionSubscription.cancel();
     _repository.close();
     super.dispose();
   }

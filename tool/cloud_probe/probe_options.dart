@@ -109,7 +109,9 @@ const _valueOptions = <String>{
   'limit',
   'oauth-url',
   'offset',
+  'order',
   'path',
   'remote-file',
   'start',
+  'sort',
 };

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:easy_cloud/features/auth/application/auth_repository.dart';
 import 'package:easy_cloud/features/auth/data/cloud_auth_api.dart';
 import 'package:easy_cloud/features/auth/data/session_store.dart';
@@ -132,6 +134,25 @@ void main() {
     expect(results, everyElement(same(rotated)));
     expect(api.refreshCalls, 1);
   });
+
+  test('a refresh finishing after logout cannot restore the session', () async {
+    final refreshResult = Completer<CloudSession>();
+    final api = _DelayedRefreshApi(refreshResult.future);
+    final store = MemorySessionStore();
+    final repository = AuthRepository(api: api, store: store, clock: () => now);
+    final old = await repository.login(
+      email: 'test@mail.ru',
+      password: 'password',
+    );
+
+    final refresh = repository.refresh(old);
+    await repository.logout();
+    refreshResult.complete(session(now, access: 'late-access'));
+
+    await expectLater(refresh, throwsA(isA<AuthFailure>()));
+    expect(repository.currentSession, isNull);
+    expect(store.session, isNull);
+  });
 }
 
 CloudSession session(
@@ -173,6 +194,24 @@ final class FakeAuthApi implements AuthApi {
     if (refreshFailure case final failure?) throw failure;
     return refreshResult ?? session;
   }
+
+  @override
+  void close() {}
+}
+
+final class _DelayedRefreshApi implements AuthApi {
+  _DelayedRefreshApi(this.result);
+
+  final Future<CloudSession> result;
+
+  @override
+  Future<CloudSession> login({
+    required String email,
+    required String password,
+  }) async => session(DateTime.utc(2026, 9, 9, 12));
+
+  @override
+  Future<CloudSession> refresh(CloudSession session) => result;
 
   @override
   void close() {}

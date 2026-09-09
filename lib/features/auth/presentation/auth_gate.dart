@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../application/auth_repository.dart';
+import '../../browser/application/browser_repository.dart';
+import '../../browser/presentation/browser_page.dart';
 import 'auth_controller.dart';
 import 'login_page.dart';
-import 'session_page.dart';
 
 final class AuthGate extends StatefulWidget {
-  const AuthGate({required this.repository, super.key});
+  const AuthGate({
+    required this.repository,
+    required this.browserRepository,
+    super.key,
+  });
 
   final AuthRepository repository;
+  final BrowserRepository browserRepository;
 
   @override
   State<AuthGate> createState() => _AuthGateState();
@@ -35,6 +41,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
+    widget.browserRepository.close();
     super.dispose();
   }
 
@@ -44,7 +51,10 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     builder: (context, _) => switch (_controller.status) {
       AuthStatus.loading => const _StartupPage(),
       AuthStatus.signedOut => LoginPage(controller: _controller),
-      AuthStatus.signedIn => SessionPage(controller: _controller),
+      AuthStatus.signedIn => BrowserPage(
+        repository: widget.browserRepository,
+        authController: _controller,
+      ),
     },
   );
 }

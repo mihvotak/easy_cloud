@@ -63,12 +63,22 @@ Future<void> main(List<String> arguments) async {
           '/',
           offset: _integerOption(options, 'offset', 0),
           limit: _integerOption(options, 'limit', 100),
+          sortType: options.value('sort') ?? 'name',
+          sortOrder: options.value('order') ?? 'asc',
         );
       case 'list':
         await client.listFolder(
           session,
           _positional(options, 0, 'remote path'),
           offset: _integerOption(options, 'offset', 0),
+          limit: _integerOption(options, 'limit', 100),
+          sortType: options.value('sort') ?? 'name',
+          sortOrder: options.value('order') ?? 'asc',
+        );
+      case 'sort-matrix':
+        await client.probeSortMatrix(
+          session,
+          options.value('path') ?? '/',
           limit: _integerOption(options, 'limit', 100),
         );
       case 'stat':
@@ -139,6 +149,7 @@ const _commands = <String>{
   'dispatcher',
   'root',
   'list',
+  'sort-matrix',
   'stat',
   'search',
   'range',
@@ -345,8 +356,9 @@ Commands:
   refresh
   csrf
   dispatcher
-  root [--offset N] [--limit N]
-  list <remote-path> [--offset N] [--limit N]
+  root [--offset N] [--limit N] [--sort name|size|mtime] [--order asc|desc]
+  list <remote-path> [--offset N] [--limit N] [--sort name|size|mtime] [--order asc|desc]
+  sort-matrix [--path /scope] [--limit N]
   stat <remote-path>
   search <query> [--path /scope] [--limit N]
   range <remote-path> [--start N] [--end N]

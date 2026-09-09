@@ -27,6 +27,7 @@ application.
 | 2026-09-09 | File stat and history | Production API v2 | Stat returned size/hash/mtime; history returned `uid`, `time`, `name`, `path`, and `size`, but no hash or revision for this account. |
 | 2026-09-09 | Range and download | Production download shard | `Range: bytes=0-31` returned HTTP 206, `Accept-Ranges: bytes`, and valid `Content-Range`; complete content passed size and cloud-hash checks. |
 | 2026-09-09 | File removal | Production API v2 | `file/remove` moved the generated probe file to trash. |
+| 2026-09-09 | Folder sorting | Production API v2, root listing | `name`, `size`, and `mtime` each accepted `asc` and `desc`; `body.sort` matched every request. Tested folder had two children, so cross-page ordering remains unverified. |
 
 ## Service defaults
 
@@ -52,7 +53,7 @@ production application.
 | API dispatcher | `POST /dispatcher/` | `access_token` query and CSRF header | Empty body | Arrays `get`, `upload`, `thumbnails`, etc. | `CONFIRMED_LIVE` 2026-09-09 |
 | Download shard | `GET <dispatcher>/d` | `token` query | No body | Plain text: `URL IP COUNT` | `CONFIRMED_LIVE` 2026-09-09 |
 | Upload shard | `GET <dispatcher>/u` | `token` query | No body | Plain text: `URL IP COUNT` | `CONFIRMED_LIVE` 2026-09-09 |
-| List folder | `GET /folder` | API auth | Query: `home`, `offset`, `limit`, `sort` | `body.list`, `body.count` | `CONFIRMED_LIVE` 2026-09-09 |
+| List folder | `GET /folder` | API auth | Query: `home`, `offset`, `limit`, `sort` (`name`/`size`/`mtime`, `asc`/`desc`) | `body.list`, `body.count`, `body.sort` | `CONFIRMED_LIVE` 2026-09-09 |
 | Stat node | `GET /file` | API auth | Query: `home` | One node in `body` | `CONFIRMED_LIVE` 2026-09-09 |
 | Search | `GET /folder/find` | API auth | Query: `q`, `path`, `limit`, legacy CSRF `token` | Folder-like object with `body.list` | `CONFIRMED_LIVE` 2026-09-09 |
 | Download | `GET <download-shard>/<path>` | `client_id`, `token` query | Optional `Range` | Binary body; HTTP 206 for valid Range | `CONFIRMED_LIVE` 2026-09-09 |
@@ -113,6 +114,12 @@ content identity must therefore be exposed only when those fields are present.
 Folder listing must paginate. A requested `limit=65535` is not evidence that
 the complete directory is returned; current reference code mentions a server
 cap of roughly 8000 entries.
+
+The server accepted all six combinations of `name`, `size`, or `mtime` with
+`asc` or `desc`, and echoed each selection in `body.sort`. This confirms the
+sorting contract, but the live test directory was too small to verify ordering
+across page boundaries. The client therefore delegates sorting to the server
+and never re-sorts an individual page locally.
 
 ## Search
 
