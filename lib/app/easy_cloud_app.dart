@@ -3,16 +3,22 @@ import 'package:flutter/material.dart';
 import '../features/auth/application/auth_repository.dart';
 import '../features/auth/presentation/auth_gate.dart';
 import '../features/browser/application/browser_repository.dart';
+import '../features/download/application/download_repository.dart';
+import '../features/search/application/search_repository.dart';
 
 final class EasyCloudApp extends StatelessWidget {
   const EasyCloudApp({
     required this.authRepository,
     required this.browserRepository,
+    required this.searchRepository,
+    required this.downloadRepository,
     super.key,
   });
 
   final AuthRepository authRepository;
   final BrowserRepository browserRepository;
+  final SearchRepository searchRepository;
+  final DownloadRepository downloadRepository;
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +78,8 @@ final class EasyCloudApp extends StatelessWidget {
       home: AuthGate(
         repository: authRepository,
         browserRepository: browserRepository,
+        searchRepository: searchRepository,
+        downloadRepository: downloadRepository,
       ),
     );
   }

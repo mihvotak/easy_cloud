@@ -7,6 +7,9 @@ import 'package:easy_cloud/features/browser/application/browser_repository.dart'
 import 'package:easy_cloud/features/browser/domain/cloud_folder_page.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
+import 'package:easy_cloud/features/download/application/download_repository.dart';
+import 'package:easy_cloud/features/download/domain/download_handle.dart';
+import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -20,6 +23,8 @@ void main() {
       EasyCloudApp(
         authRepository: repository,
         browserRepository: _EmptyBrowserRepository(),
+        searchRepository: _EmptySearchRepository(),
+        downloadRepository: _NoopDownloadRepository(),
       ),
     );
     await tester.pumpAndSettle();
@@ -49,6 +54,8 @@ void main() {
       EasyCloudApp(
         authRepository: AuthRepository(api: _WidgetAuthApi(), store: store),
         browserRepository: _EmptyBrowserRepository(),
+        searchRepository: _EmptySearchRepository(),
+        downloadRepository: _NoopDownloadRepository(),
       ),
     );
     await tester.pumpAndSettle();
@@ -64,6 +71,8 @@ void main() {
       EasyCloudApp(
         authRepository: AuthRepository(api: _WidgetAuthApi(), store: store),
         browserRepository: _TreeBrowserRepository(),
+        searchRepository: _EmptySearchRepository(),
+        downloadRepository: _NoopDownloadRepository(),
       ),
     );
     await tester.pumpAndSettle();
@@ -157,6 +166,23 @@ final class _TreeBrowserRepository implements BrowserRepository {
     totalCount: 1,
     sort: sort,
   );
+
+  @override
+  void close() {}
+}
+
+final class _EmptySearchRepository implements SearchRepository {
+  @override
+  Future<List<CloudNode>> search(
+    String query, {
+    String path = '/',
+    int limit = 100,
+  }) async => const [];
+}
+
+final class _NoopDownloadRepository implements DownloadRepository {
+  @override
+  DownloadHandle start(CloudNode node) => throw UnimplementedError();
 
   @override
   void close() {}

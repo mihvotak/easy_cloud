@@ -14,9 +14,11 @@ void main() {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       final seenAccessTokens = <String>[];
       final seenCsrfTokens = <String?>[];
+      final seenCsrfQueryTokens = <String?>[];
       final serving = server.listen((request) async {
         seenAccessTokens.add(request.uri.queryParameters['access_token']!);
         seenCsrfTokens.add(request.headers.value('X-CSRF-Token'));
+        seenCsrfQueryTokens.add(request.uri.queryParameters['token']);
         request.response.statusCode = seenAccessTokens.length == 1 ? 403 : 200;
         request.response.write('{"status":200,"body":{}}');
         await request.response.close();
@@ -30,12 +32,16 @@ void main() {
       );
 
       try {
-        final response = await transport.get('folder');
+        final response = await transport.get(
+          'folder/find',
+          includeCsrfQuery: true,
+        );
 
         expect(response.statusCode, 200);
         expect(api.refreshCalls, 1);
         expect(seenAccessTokens, ['old-access', 'new-access']);
         expect(seenCsrfTokens, ['old-csrf', 'new-csrf']);
+        expect(seenCsrfQueryTokens, ['old-csrf', 'new-csrf']);
       } finally {
         transport.close();
         auth.close();

@@ -13,6 +13,7 @@ abstract interface class CloudTransport {
   Future<CloudResponse> get(
     String endpoint, {
     Map<String, String> query = const {},
+    bool includeCsrfQuery = false,
   });
 
   void close();

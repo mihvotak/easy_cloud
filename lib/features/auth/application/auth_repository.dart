@@ -25,6 +25,8 @@ final class AuthRepository {
 
   CloudSession? get currentSession => _currentSession;
 
+  int get sessionEpoch => _sessionEpoch;
+
   Stream<CloudSession?> get sessionChanges => _sessionChanges.stream;
 
   Future<CloudSession?> restore() async {

@@ -25,9 +25,15 @@ final class AuthenticatedCloudTransport implements CloudTransport {
   Future<CloudResponse> get(
     String endpoint, {
     Map<String, String> query = const {},
+    bool includeCsrfQuery = false,
   }) async {
     var session = await _freshSession();
-    var response = await _sendGet(endpoint, query, session);
+    var response = await _sendGet(
+      endpoint,
+      query,
+      session,
+      includeCsrfQuery: includeCsrfQuery,
+    );
     if (!_isAuthRejected(response)) return _requireHttpSuccess(response);
 
     try {
@@ -37,7 +43,12 @@ final class AuthenticatedCloudTransport implements CloudTransport {
     } on AuthFailure catch (failure) {
       throw _fromAuthFailure(failure);
     }
-    response = await _sendGet(endpoint, query, session);
+    response = await _sendGet(
+      endpoint,
+      query,
+      session,
+      includeCsrfQuery: includeCsrfQuery,
+    );
     if (_isAuthRejected(response)) {
       try {
         await _authRepository.logout();
@@ -63,12 +74,17 @@ final class AuthenticatedCloudTransport implements CloudTransport {
   Future<CloudResponse> _sendGet(
     String endpoint,
     Map<String, String> query,
-    CloudSession session,
-  ) async {
+    CloudSession session, {
+    required bool includeCsrfQuery,
+  }) async {
     final uri = _apiUrl
         .resolve(endpoint)
         .replace(
-          queryParameters: {...query, 'access_token': session.accessToken},
+          queryParameters: {
+            ...query,
+            if (includeCsrfQuery) 'token': session.csrfToken,
+            'access_token': session.accessToken,
+          },
         );
     try {
       final request = await _httpClient

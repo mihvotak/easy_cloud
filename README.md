@@ -12,6 +12,9 @@ Implemented:
 - folder navigation with Android back handling and pull-to-refresh;
 - server-side sorting by name, size, or modification time;
 - paginated listings and file/folder metadata;
+- server-side name search in the current folder with navigation from results;
+- resumable streaming downloads with progress, cancellation, integrity checks,
+  and an account-isolated content-addressed offline cache;
 - sanitized protocol probe and live contract documentation under `docs/`.
 
 The normal Mail.ru account password is not supported. Create an application

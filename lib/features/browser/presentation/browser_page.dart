@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../../auth/presentation/auth_controller.dart';
+import '../../download/presentation/download_controller.dart';
+import '../../search/application/search_repository.dart';
+import '../../search/presentation/search_page.dart';
 import '../application/browser_repository.dart';
 import '../domain/cloud_node.dart';
 import '../domain/cloud_sort.dart';
 import 'browser_controller.dart';
+import 'cloud_node_widgets.dart';
 
 final class BrowserPage extends StatefulWidget {
   const BrowserPage({
     required this.repository,
+    required this.searchRepository,
+    required this.downloadController,
     required this.authController,
     this.path = '/',
     this.title,
@@ -16,6 +22,8 @@ final class BrowserPage extends StatefulWidget {
   });
 
   final BrowserRepository repository;
+  final SearchRepository searchRepository;
+  final DownloadController downloadController;
   final AuthController authController;
   final String path;
   final String? title;
@@ -65,6 +73,11 @@ final class _BrowserPageState extends State<BrowserPage> {
       appBar: AppBar(
         title: Text(widget.title ?? _controller.folder?.name ?? 'Easy Cloud'),
         actions: [
+          IconButton(
+            tooltip: 'Поиск',
+            onPressed: _openSearch,
+            icon: const Icon(Icons.search_rounded),
+          ),
           PopupMenuButton<CloudSort>(
             tooltip: 'Сортировка',
             initialValue: _controller.sort,
@@ -128,7 +141,7 @@ final class _BrowserPageState extends State<BrowserPage> {
         itemBuilder: (context, index) {
           if (index == _controller.items.length) return _buildFooter(context);
           final node = _controller.items[index];
-          return _CloudNodeTile(
+          return CloudNodeTile(
             node: node,
             onTap: () => node.isFolder
                 ? _openFolder(node)
@@ -169,6 +182,8 @@ final class _BrowserPageState extends State<BrowserPage> {
       MaterialPageRoute<void>(
         builder: (context) => BrowserPage(
           repository: widget.repository,
+          searchRepository: widget.searchRepository,
+          downloadController: widget.downloadController,
           authController: widget.authController,
           path: folder.path,
           title: folder.name,
@@ -177,104 +192,26 @@ final class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
-  Future<void> _showMetadata(BuildContext context, CloudNode node) =>
-      showModalBottomSheet<void>(
-        context: context,
-        showDragHandle: true,
-        isScrollControlled: true,
-        builder: (context) => _MetadataSheet(node: node),
-      );
-}
-
-final class _CloudNodeTile extends StatelessWidget {
-  const _CloudNodeTile({
-    required this.node,
-    required this.onTap,
-    required this.onInfo,
-  });
-
-  final CloudNode node;
-  final VoidCallback onTap;
-  final VoidCallback onInfo;
-
-  @override
-  Widget build(BuildContext context) => Card(
-    elevation: 0,
-    color: Theme.of(context).colorScheme.surfaceContainerLow,
-    margin: const EdgeInsets.symmetric(vertical: 4),
-    child: ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-      leading: Icon(
-        node.isFolder ? Icons.folder_rounded : _fileIcon(node.name),
-        size: 34,
-        color: node.isFolder
-            ? const Color(0xff56d6c9)
-            : Theme.of(context).colorScheme.primary,
-      ),
-      title: Text(node.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-      subtitle: Text(_nodeSubtitle(node)),
-      trailing: IconButton(
-        tooltip: 'Сведения',
-        onPressed: onInfo,
-        icon: const Icon(Icons.info_outline_rounded),
-      ),
-      onTap: onTap,
-    ),
-  );
-}
-
-final class _MetadataSheet extends StatelessWidget {
-  const _MetadataSheet({required this.node});
-
-  final CloudNode node;
-
-  @override
-  Widget build(BuildContext context) {
-    final rows = <(String, String)>[
-      ('Путь', node.path),
-      ('Тип', node.isFolder ? 'Папка' : 'Файл'),
-      if (node.size case final value?) ('Размер', _formatBytes(value)),
-      if (node.modifiedAt case final value?) ('Изменён', _formatDate(value)),
-      if (node.fileCount case final value?) ('Файлов', '$value'),
-      if (node.folderCount case final value?) ('Папок', '$value'),
-      if (node.revision case final value?) ('Ревизия', value),
-      if (node.globalRevision case final value?) ('Общая ревизия', value),
-      if (node.hash case final value?) ('Хеш', value),
-      if (node.virusScan case final value?) ('Проверка', value),
-    ];
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(node.name, style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 16),
-            for (final row in rows)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: 116,
-                      child: Text(
-                        row.$1,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                    Expanded(child: SelectableText(row.$2)),
-                  ],
-                ),
-              ),
-          ],
+  void _openSearch() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => SearchPage(
+          repository: widget.searchRepository,
+          browserRepository: widget.repository,
+          downloadController: widget.downloadController,
+          authController: widget.authController,
+          path: widget.path,
         ),
       ),
     );
   }
+
+  Future<void> _showMetadata(BuildContext context, CloudNode node) =>
+      showCloudNodeMetadata(
+        context,
+        node,
+        downloadController: widget.downloadController,
+      );
 }
 
 final class _EmptyFolder extends StatelessWidget {
@@ -332,56 +269,4 @@ final class _MessageState extends StatelessWidget {
       ),
     ),
   );
-}
-
-IconData _fileIcon(String name) {
-  final extension = name.split('.').last.toLowerCase();
-  return switch (extension) {
-    'jpg' ||
-    'jpeg' ||
-    'png' ||
-    'gif' ||
-    'webp' ||
-    'heic' => Icons.image_rounded,
-    'txt' ||
-    'md' ||
-    'json' ||
-    'xml' ||
-    'yaml' ||
-    'yml' ||
-    'csv' => Icons.description_rounded,
-    _ => Icons.insert_drive_file_rounded,
-  };
-}
-
-String _nodeSubtitle(CloudNode node) {
-  if (node.isFolder) {
-    final parts = <String>[
-      if (node.folderCount case final count?) '$count папок',
-      if (node.fileCount case final count?) '$count файлов',
-    ];
-    return parts.isEmpty ? 'Папка' : parts.join(' · ');
-  }
-  return [
-    if (node.size case final size?) _formatBytes(size),
-    if (node.modifiedAt case final date?) _formatDate(date),
-  ].join(' · ');
-}
-
-String _formatBytes(int bytes) {
-  if (bytes < 1024) return '$bytes Б';
-  const units = ['КБ', 'МБ', 'ГБ', 'ТБ'];
-  var value = bytes / 1024;
-  var unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return '${value < 10 ? value.toStringAsFixed(1) : value.toStringAsFixed(0)} ${units[unit]}';
-}
-
-String _formatDate(DateTime value) {
-  final date = value.toLocal();
-  String two(int number) => number.toString().padLeft(2, '0');
-  return '${two(date.day)}.${two(date.month)}.${date.year} ${two(date.hour)}:${two(date.minute)}';
 }

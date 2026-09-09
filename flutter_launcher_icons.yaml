@@ -1,0 +1,6 @@
+flutter_launcher_icons:
+  image_path: "assets/cloud_logo.png"
+  android: true
+  ios: false
+  adaptive_icon_foreground: "assets/cloud_logo.png"
+  adaptive_icon_background: "#000000"

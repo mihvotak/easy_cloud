@@ -75,6 +75,95 @@ final class CloudMailApi {
     }
   }
 
+  Future<List<CloudNode>> search(
+    String query, {
+    String path = '/',
+    int limit = 100,
+  }) async {
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) return const [];
+
+    final response = await _transport.get(
+      'folder/find',
+      query: {
+        'q': normalizedQuery,
+        'path': _normalizePath(path),
+        'limit': '$limit',
+      },
+      includeCsrfQuery: true,
+    );
+    try {
+      final envelope = response.json;
+      if (envelope is! Map) throw const FormatException();
+      final status = _asInt(envelope['status']);
+      if (status != null && status >= 400) {
+        throw CloudFailure(
+          status == 404 ? CloudFailureType.notFound : CloudFailureType.service,
+          status == 404
+              ? 'Папка не найдена.'
+              : 'Mail.ru вернул ошибку $status.',
+          statusCode: status,
+        );
+      }
+      final body = envelope['body'];
+      if (body is! Map) throw const FormatException();
+      final rawItems = body['list'];
+      if (rawItems is! List) throw const FormatException();
+      return rawItems
+          .map((item) {
+            if (item is! Map) throw const FormatException();
+            return _mapNode(item);
+          })
+          .toList(growable: false);
+    } on CloudFailure {
+      rethrow;
+    } on FormatException {
+      throw const CloudFailure(
+        CloudFailureType.invalidResponse,
+        'Mail.ru вернул неизвестный формат результатов поиска.',
+      );
+    } catch (_) {
+      throw const CloudFailure(
+        CloudFailureType.invalidResponse,
+        'Mail.ru вернул неизвестный формат результатов поиска.',
+      );
+    }
+  }
+
+  Future<CloudNode> stat(String path) async {
+    final response = await _transport.get(
+      'file',
+      query: {'home': _normalizePath(path)},
+    );
+    try {
+      final envelope = response.json;
+      if (envelope is! Map) throw const FormatException();
+      final status = _asInt(envelope['status']);
+      if (status != null && status >= 400) {
+        throw CloudFailure(
+          status == 404 ? CloudFailureType.notFound : CloudFailureType.service,
+          status == 404 ? 'Файл не найден.' : 'Mail.ru вернул ошибку $status.',
+          statusCode: status,
+        );
+      }
+      final body = envelope['body'];
+      if (body is! Map) throw const FormatException();
+      return _mapNode(body);
+    } on CloudFailure {
+      rethrow;
+    } on FormatException {
+      throw const CloudFailure(
+        CloudFailureType.invalidResponse,
+        'Mail.ru вернул неизвестный формат метаданных файла.',
+      );
+    } catch (_) {
+      throw const CloudFailure(
+        CloudFailureType.invalidResponse,
+        'Mail.ru вернул неизвестный формат метаданных файла.',
+      );
+    }
+  }
+
   CloudNode _mapNode(Map<dynamic, dynamic> json, {String? fallbackName}) {
     final path = json['home'];
     final name = json['name'] ?? fallbackName;

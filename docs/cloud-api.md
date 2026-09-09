@@ -23,6 +23,7 @@ application.
 | 2026-09-09 | API and OAuth dispatchers | Production API v2 and `dispatcher.cloud.mail.ru` | Success; API shard arrays and plain-text `/d` and `/u` responses confirmed. |
 | 2026-09-09 | Root folder listing | Production API v2 | Success; folder metadata, counts, sort, revision fields, and list confirmed. |
 | 2026-09-09 | `folder/find` | Production API v2, root scope | Success; server-side search is currently available. |
+| 2026-09-09 | `folder/find` recheck | Production API v2, root scope, one-character query, limit 10 | HTTP 200; folder-like `body.list` returned a result. Both OAuth access token and legacy CSRF query token were accepted. |
 | 2026-09-09 | Upload and `file/add` | Production upload shard and API v2 | Raw PUT returned HTTP 201 and a 40-character hash; strict registration and subsequent stat succeeded. |
 | 2026-09-09 | File stat and history | Production API v2 | Stat returned size/hash/mtime; history returned `uid`, `time`, `name`, `path`, and `size`, but no hash or revision for this account. |
 | 2026-09-09 | Range and download | Production download shard | `Range: bytes=0-31` returned HTTP 206, `Accept-Ranges: bytes`, and valid `Content-Range`; complete content passed size and cloud-hash checks. |
@@ -133,6 +134,8 @@ It is absent from current `CloudMailRu`, `WebDavMailRuCloud`, and `tucha`, but a
 live probe on 2026-09-09 confirmed that it remains available in production.
 The capability still needs graceful fallback because it is supported only by
 historical reference code and can disappear independently of the core API.
+The authenticated transport must regenerate both `access_token` and the legacy
+CSRF `token` query parameter when retrying after a token refresh.
 
 ## References
 
