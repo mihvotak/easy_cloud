@@ -8,12 +8,17 @@ import '../../../cloud_mail/probe/cloud_hash.dart';
 import '../../download/domain/download_cancellation.dart';
 import '../application/editor_save_repository.dart';
 
+typedef EditorExactEncoder =
+    List<int> Function(String text, {required bool hasUtf8Bom});
+
 final class EditorPage extends StatefulWidget {
   const EditorPage({
     required this.preparedFile,
     required this.editorSaveService,
     this.authController,
     this.onSaved,
+    this.exactEncodingDebounce = const Duration(milliseconds: 200),
+    this.exactEncoder,
     super.key,
   });
 
@@ -21,6 +26,9 @@ final class EditorPage extends StatefulWidget {
   final EditorSaveService editorSaveService;
   final AuthController? authController;
   final Future<void> Function(EditorSaveResult result)? onSaved;
+  final Duration exactEncodingDebounce;
+  @visibleForTesting
+  final EditorExactEncoder? exactEncoder;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -32,20 +40,31 @@ final class _EditorPageState extends State<EditorPage> {
   late List<int> _baselineBytes;
   late List<int> _encodedBytes;
   late bool _hasUtf8Bom;
+  late bool _exactDirty;
+  late bool _exactOversize;
 
   EditorSaveCancellation? _saveCancellation;
+  Timer? _encodingDebounceTimer;
   EditorSaveResult? _lastSaveResult;
   String? _progressMessage;
   String? _inlineMessage;
   bool _isSaving = false;
+  bool _exactEncodingPending = false;
+  bool _conflictDialogShowing = false;
   bool _backDialogShowing = false;
   bool _forceClosing = false;
+  int _textRevision = 0;
 
-  bool get _isDirty => !listEquals(_encodedBytes, _baselineBytes);
+  bool get _isDirty => _exactEncodingPending || _exactDirty;
 
-  bool get _isOversize => _encodedBytes.length > editorMaxBytes;
+  bool get _isOversize => _exactOversize;
 
-  bool get _canSave => _isDirty && !_isSaving && !_isOversize;
+  bool get _canSave =>
+      _isDirty &&
+      !_exactEncodingPending &&
+      !_isSaving &&
+      !_conflictDialogShowing &&
+      !_isOversize;
 
   @override
   void initState() {
@@ -54,6 +73,8 @@ final class _EditorPageState extends State<EditorPage> {
     _baselineBytes = List<int>.unmodifiable(widget.preparedFile.bytes);
     _hasUtf8Bom = widget.preparedFile.hasUtf8Bom;
     _encodedBytes = _baselineBytes;
+    _exactDirty = false;
+    _exactOversize = _encodedBytes.length > editorMaxBytes;
     _textController = TextEditingController(text: widget.preparedFile.text)
       ..addListener(_onTextChanged);
     widget.authController?.addListener(_onAuthChanged);
@@ -65,6 +86,8 @@ final class _EditorPageState extends State<EditorPage> {
     final cancellation = _saveCancellation;
     cancellation?.cancel();
     unawaited(cancellation?.close());
+    _encodingDebounceTimer?.cancel();
+    _encodingDebounceTimer = null;
     _textController
       ..removeListener(_onTextChanged)
       ..dispose();
@@ -84,16 +107,42 @@ final class _EditorPageState extends State<EditorPage> {
   }
 
   void _onTextChanged() {
-    final wasOversize = _isOversize;
-    final next = List<int>.unmodifiable(
-      encodeEditorUtf8(_textController.text, hasUtf8Bom: _hasUtf8Bom),
-    );
-    if (listEquals(next, _encodedBytes)) {
-      return;
+    _encodingDebounceTimer?.cancel();
+    _encodingDebounceTimer = null;
+    final revision = ++_textRevision;
+    _exactEncodingPending = true;
+    if (mounted) {
+      setState(() {
+        // A stale size/error banner should not describe text that is still
+        // being edited. The exact banner is restored after the debounce.
+        _inlineMessage = null;
+      });
     }
+
+    late final Timer timer;
+    timer = Timer(widget.exactEncodingDebounce, () {
+      if (!mounted ||
+          !identical(_encodingDebounceTimer, timer) ||
+          revision != _textRevision) {
+        return;
+      }
+      _encodingDebounceTimer = null;
+      _recomputeExactEncoding(revision);
+    });
+    _encodingDebounceTimer = timer;
+  }
+
+  void _recomputeExactEncoding(int revision) {
+    if (!mounted || revision != _textRevision) return;
+    final wasOversize = _isOversize;
+    final next = List<int>.unmodifiable(_encodeExact(_textController.text));
+    if (!mounted || revision != _textRevision) return;
+    _encodedBytes = next;
+    _exactDirty = !listEquals(next, _baselineBytes);
+    _exactOversize = next.length > editorMaxBytes;
+    _exactEncodingPending = false;
     setState(() {
-      _encodedBytes = next;
-      if (_isOversize) {
+      if (_exactOversize) {
         _inlineMessage = _oversizeMessage(next.length);
       } else if (wasOversize) {
         _inlineMessage = null;
@@ -101,15 +150,41 @@ final class _EditorPageState extends State<EditorPage> {
     });
   }
 
+  List<int> _synchronizeExactEncoding() {
+    _encodingDebounceTimer?.cancel();
+    _encodingDebounceTimer = null;
+    ++_textRevision;
+    final wasOversize = _isOversize;
+    final next = List<int>.unmodifiable(_encodeExact(_textController.text));
+    _encodedBytes = next;
+    _exactDirty = !listEquals(next, _baselineBytes);
+    _exactOversize = next.length > editorMaxBytes;
+    _exactEncodingPending = false;
+    if (mounted) {
+      setState(() {
+        if (_exactOversize) {
+          _inlineMessage = _oversizeMessage(next.length);
+        } else if (wasOversize) {
+          _inlineMessage = null;
+        }
+      });
+    }
+    return next;
+  }
+
+  List<int> _encodeExact(String text) =>
+      (widget.exactEncoder ?? encodeEditorUtf8)(text, hasUtf8Bom: _hasUtf8Bom);
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final title = _basename(_baseline.path);
     return PopScope<void>(
-      canPop: _forceClosing || (!_isDirty && !_isSaving),
+      canPop:
+          _forceClosing || (!_isDirty && !_isSaving && !_conflictDialogShowing),
       onPopInvokedWithResult: (didPop, _) {
         if (didPop || _forceClosing) return;
-        if (_isSaving) {
+        if (_isSaving || _conflictDialogShowing) {
           _showMessage('Сохранение ещё выполняется.');
         } else {
           unawaited(_requestPop());
@@ -119,7 +194,9 @@ final class _EditorPageState extends State<EditorPage> {
         appBar: AppBar(
           leading: IconButton(
             tooltip: 'Назад',
-            onPressed: _isSaving ? null : () => unawaited(_requestPop()),
+            onPressed: _isSaving || _conflictDialogShowing
+                ? null
+                : () => unawaited(_requestPop()),
             icon: const Icon(Icons.arrow_back_rounded),
           ),
           titleSpacing: 0,
@@ -177,7 +254,7 @@ final class _EditorPageState extends State<EditorPage> {
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
                   child: TextField(
                     controller: _textController,
-                    readOnly: _isSaving,
+                    readOnly: _isSaving || _conflictDialogShowing,
                     expands: true,
                     maxLines: null,
                     minLines: null,
@@ -215,17 +292,34 @@ final class _EditorPageState extends State<EditorPage> {
   }
 
   Future<void> _save() async {
-    if (!_canSave) {
-      if (_isOversize) {
-        setState(() => _inlineMessage = _oversizeMessage(_encodedBytes.length));
-      }
-      return;
-    }
     await _saveWithChoice(EditorSaveChoice.unchanged);
   }
 
-  Future<void> _saveWithChoice(EditorSaveChoice choice) async {
-    if (!mounted || _isSaving || _isOversize || !_isDirty) return;
+  Future<void> _saveWithChoice(
+    EditorSaveChoice choice, {
+    List<int>? frozenBytes,
+    int? frozenTextRevision,
+    String? frozenText,
+  }) async {
+    if (!mounted || _isSaving || _conflictDialogShowing) return;
+    final canReuseFrozen =
+        frozenBytes != null &&
+        frozenTextRevision == _textRevision &&
+        frozenText == _textController.text &&
+        !_exactEncodingPending;
+    final bytes = canReuseFrozen
+        ? List<int>.unmodifiable(frozenBytes)
+        : _synchronizeExactEncoding();
+    if (!mounted) return;
+    if (_isOversize || !_isDirty) {
+      if (_isOversize) {
+        setState(() => _inlineMessage = _oversizeMessage(bytes.length));
+      }
+      return;
+    }
+    final attemptBytes = List<int>.unmodifiable(bytes);
+    final attemptText = _textController.text;
+    final attemptRevision = _textRevision;
     final token = DownloadCancellationToken();
     _saveCancellation = token;
     setState(() {
@@ -239,7 +333,7 @@ final class _EditorPageState extends State<EditorPage> {
     try {
       final result = await widget.editorSaveService.save(
         _baseline,
-        List<int>.from(_encodedBytes),
+        List<int>.from(attemptBytes),
         choice: choice,
         cancellation: token,
         onProgress: (progress) {
@@ -250,13 +344,34 @@ final class _EditorPageState extends State<EditorPage> {
         },
       );
       if (!mounted || !identical(_saveCancellation, token)) return;
-      await _applySuccessfulSave(result);
+      await _applySuccessfulSave(
+        result,
+        savedBytes: attemptBytes,
+        savedText: attemptText,
+        savedTextRevision: attemptRevision,
+      );
     } on EditorSaveFailure catch (failure) {
       if (!mounted || !identical(_saveCancellation, token)) return;
       if (failure.isConflict) {
+        _setConflictDialogShowing(true);
         _finishSaving(token);
-        final selected = await _showConflictDialog();
-        if (selected != null && mounted) await _saveWithChoice(selected);
+        EditorSaveChoice? selected;
+        try {
+          selected = await _showConflictDialog();
+        } finally {
+          if (mounted) _setConflictDialogShowing(false);
+        }
+        if (selected != null && mounted) {
+          final reuseFrozen =
+              _textRevision == attemptRevision &&
+              _textController.text == attemptText;
+          await _saveWithChoice(
+            selected,
+            frozenBytes: reuseFrozen ? attemptBytes : null,
+            frozenTextRevision: reuseFrozen ? attemptRevision : null,
+            frozenText: reuseFrozen ? attemptText : null,
+          );
+        }
         return;
       }
       _showFailure(failure);
@@ -274,11 +389,21 @@ final class _EditorPageState extends State<EditorPage> {
     }
   }
 
-  Future<void> _applySuccessfulSave(EditorSaveResult result) async {
-    final bytes = List<int>.unmodifiable(_encodedBytes);
+  Future<void> _applySuccessfulSave(
+    EditorSaveResult result, {
+    required List<int> savedBytes,
+    required String savedText,
+    required int savedTextRevision,
+  }) async {
+    final bytes = List<int>.unmodifiable(savedBytes);
     final remote = result.remoteNode;
     final hash = remote.hash ?? calculateCloudHash(bytes);
     final size = remote.size ?? bytes.length;
+    final currentTextChanged =
+        _textRevision != savedTextRevision || _textController.text != savedText;
+    _encodingDebounceTimer?.cancel();
+    _encodingDebounceTimer = null;
+    ++_textRevision;
     _baseline = EditorSaveBaseline(
       path: remote.path,
       hash: hash,
@@ -289,11 +414,25 @@ final class _EditorPageState extends State<EditorPage> {
     );
     _baselineBytes = bytes;
     _lastSaveResult = result;
+
+    var currentBytes = bytes;
+    var currentDirty = false;
+    var currentOversize = bytes.length > editorMaxBytes;
+    if (currentTextChanged) {
+      currentBytes = List<int>.unmodifiable(_encodeExact(_textController.text));
+      currentDirty = !listEquals(currentBytes, _baselineBytes);
+      currentOversize = currentBytes.length > editorMaxBytes;
+    }
+    _encodedBytes = currentBytes;
+    _exactDirty = currentDirty;
+    _exactOversize = currentOversize;
+    _exactEncodingPending = false;
     if (mounted) {
       setState(() {
-        _encodedBytes = bytes;
         _inlineMessage = result.isPartialSuccess
             ? 'Файл сохранён в облаке, но локальная офлайн-связь не обновлена.'
+            : currentOversize
+            ? _oversizeMessage(currentBytes.length)
             : null;
         _progressMessage = null;
       });
@@ -312,12 +451,19 @@ final class _EditorPageState extends State<EditorPage> {
   void _finishSaving(EditorSaveCancellation token) {
     if (!identical(_saveCancellation, token)) return;
     _saveCancellation = null;
-    if (!mounted) return;
-    setState(() {
-      _isSaving = false;
-      _progressMessage = null;
-    });
+    if (mounted) {
+      setState(() {
+        _isSaving = false;
+        _progressMessage = null;
+      });
+    }
     unawaited(token.close());
+  }
+
+  void _setConflictDialogShowing(bool showing) {
+    if (_conflictDialogShowing == showing) return;
+    _conflictDialogShowing = showing;
+    if (mounted) setState(() {});
   }
 
   Future<EditorSaveChoice?> _showConflictDialog() {
@@ -363,7 +509,7 @@ final class _EditorPageState extends State<EditorPage> {
 
   Future<void> _requestPop() async {
     if (!mounted || _backDialogShowing) return;
-    if (_isSaving) {
+    if (_isSaving || _conflictDialogShowing) {
       _showMessage('Сохранение ещё выполняется.');
       return;
     }

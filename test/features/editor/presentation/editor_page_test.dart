@@ -122,6 +122,253 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('keeps save disabled until the exact encoding settles', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, debounce: const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    expect(_saveButton(tester).onPressed, isNull);
+    expect(find.text('●'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(_saveButton(tester).onPressed, isNotNull);
+  });
+
+  testWidgets('guards back immediately while exact encoding is pending', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, debounce: const Duration(seconds: 1)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    expect(_saveButton(tester).onPressed, isNull);
+
+    await tester.tap(find.byTooltip('Назад'));
+    await tester.pumpAndSettle();
+    expect(find.text('Не сохранять'), findsOneWidget);
+    expect(find.text('Остаться'), findsOneWidget);
+  });
+
+  testWidgets('clears dirty state when text is reverted after settling', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, debounce: const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    expect(find.text('●'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'original');
+    await tester.pump();
+    expect(_saveButton(tester).onPressed, isNull);
+
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('●'), findsNothing);
+    expect(_saveButton(tester).onPressed, isNull);
+  });
+
+  testWidgets('uses one final debounced value after rapid edits', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    var encodeCount = 0;
+    await tester.pumpWidget(
+      _app(
+        service,
+        debounce: const Duration(seconds: 1),
+        exactEncoder: (text, {required hasUtf8Bom}) {
+          encodeCount++;
+          return encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    controller.text = 'first';
+    await tester.pump(const Duration(milliseconds: 10));
+    controller.text = 'second';
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(_saveButton(tester).onPressed, isNull);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(_saveButton(tester).onPressed, isNotNull);
+    expect(encodeCount, 1);
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+
+    expect(service.savedBytes, hasLength(1));
+    expect(
+      service.savedBytes.single,
+      encodeEditorUtf8('second', hasUtf8Bom: false),
+    );
+    expect(encodeCount, 2);
+  });
+
+  testWidgets('updates exact oversize state including the original BOM', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    var sawBom = false;
+    await tester.pumpWidget(
+      _app(
+        service,
+        debounce: const Duration(milliseconds: 100),
+        hasUtf8Bom: true,
+        exactEncoder: (text, {required hasUtf8Bom}) {
+          sawBom = hasUtf8Bom;
+          if (text == 'oversize') {
+            return List<int>.filled(editorMaxBytes + 1, 0x61, growable: false);
+          }
+          return encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    tester.widget<TextField>(find.byType(TextField)).controller!.text =
+        'oversize';
+    await tester.pump();
+    expect(find.textContaining('Размер текста:'), findsNothing);
+    expect(_saveButton(tester).onPressed, isNull);
+
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('Размер текста: 10485761 байт'), findsOneWidget);
+    expect(_saveButton(tester).onPressed, isNull);
+    expect(sawBom, isTrue);
+  });
+
+  testWidgets('large listener work waits for the debounce', (tester) async {
+    final service = _FakeEditorSaveService();
+    var encodeCount = 0;
+    await tester.pumpWidget(
+      _app(
+        service,
+        debounce: const Duration(seconds: 1),
+        exactEncoder: (text, {required hasUtf8Bom}) {
+          encodeCount++;
+          return encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final largeText = String.fromCharCodes(
+      List<int>.filled(64 * 1024, 0x61, growable: false),
+    );
+    tester.widget<TextField>(find.byType(TextField)).controller!.text =
+        largeText;
+    await tester.pump();
+
+    expect(find.textContaining('Размер текста:'), findsNothing);
+    expect(_saveButton(tester).onPressed, isNull);
+    expect(encodeCount, 0);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(encodeCount, 1);
+  });
+
+  testWidgets('dispose cancels pending exact encoding', (tester) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, debounce: const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Назад'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Не сохранять'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.byType(EditorPage), findsNothing);
+  });
+
+  testWidgets('direct save encodes current text before uploading', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(_app(service));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'first');
+    await tester.pump();
+    final save = _saveButton(tester).onPressed;
+    expect(save, isNotNull);
+
+    tester.widget<TextField>(find.byType(TextField)).controller!.text =
+        'second';
+    save!();
+    await tester.pumpAndSettle();
+
+    expect(
+      service.savedBytes.single,
+      encodeEditorUtf8('second', hasUtf8Bom: false),
+    );
+  });
+
+  testWidgets('conflict retry uploads the frozen attempt bytes', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService(conflictFirst: true);
+    await tester.pumpWidget(_app(service));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isTrue);
+    await tester.tap(find.text('Поверх'));
+    await tester.pumpAndSettle();
+
+    expect(service.savedBytes, hasLength(2));
+    expect(
+      service.savedBytes[0],
+      encodeEditorUtf8('changed', hasUtf8Bom: false),
+    );
+    expect(service.savedBytes[1], service.savedBytes[0]);
+  });
+
+  testWidgets('conflict retry re-encodes if text changed during the dialog', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService(conflictFirst: true);
+    await tester.pumpWidget(_app(service));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+
+    tester.widget<TextField>(find.byType(TextField)).controller!.text =
+        'edited during dialog';
+    await tester.tap(find.text('Поверх'));
+    await tester.pumpAndSettle();
+
+    expect(
+      service.savedBytes[1],
+      encodeEditorUtf8('edited during dialog', hasUtf8Bom: false),
+    );
+  });
 }
 
 final Finder _saveButtonFinder = find.byIcon(Icons.save_rounded);
@@ -130,13 +377,26 @@ IconButton _saveButton(WidgetTester tester) => tester.widget<IconButton>(
   find.ancestor(of: _saveButtonFinder, matching: find.byType(IconButton)),
 );
 
-Widget _app(EditorSaveService service) =>
-    MaterialApp(home: _EditorHost(service));
+Widget _app(
+  EditorSaveService service, {
+  Duration debounce = Duration.zero,
+  bool hasUtf8Bom = false,
+  EditorExactEncoder? exactEncoder,
+}) =>
+    MaterialApp(home: _EditorHost(service, debounce, hasUtf8Bom, exactEncoder));
 
 final class _EditorHost extends StatefulWidget {
-  const _EditorHost(this.service);
+  const _EditorHost(
+    this.service,
+    this.debounce,
+    this.hasUtf8Bom,
+    this.exactEncoder,
+  );
 
   final EditorSaveService service;
+  final Duration debounce;
+  final bool hasUtf8Bom;
+  final EditorExactEncoder? exactEncoder;
 
   @override
   State<_EditorHost> createState() => _EditorHostState();
@@ -151,8 +411,14 @@ final class _EditorHostState extends State<_EditorHost> {
       Navigator.of(context).push<void>(
         MaterialPageRoute<void>(
           builder: (_) => EditorPage(
-            preparedFile: _prepared('/docs/note.txt', 'original'),
+            preparedFile: _prepared(
+              '/docs/note.txt',
+              'original',
+              hasUtf8Bom: widget.hasUtf8Bom,
+            ),
             editorSaveService: widget.service,
+            exactEncodingDebounce: widget.debounce,
+            exactEncoder: widget.exactEncoder,
           ),
         ),
       );
@@ -163,8 +429,12 @@ final class _EditorHostState extends State<_EditorHost> {
   Widget build(BuildContext context) => const SizedBox.shrink();
 }
 
-PreparedEditorFile _prepared(String path, String text) {
-  final bytes = encodeEditorUtf8(text, hasUtf8Bom: false);
+PreparedEditorFile _prepared(
+  String path,
+  String text, {
+  bool hasUtf8Bom = false,
+}) {
+  final bytes = encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
   final node = CloudNode(
     path: path,
     name: path.substring(path.lastIndexOf('/') + 1),
@@ -176,7 +446,7 @@ PreparedEditorFile _prepared(String path, String text) {
     file: File('/verified/object'),
     remoteNode: node,
     text: text,
-    hasUtf8Bom: false,
+    hasUtf8Bom: hasUtf8Bom,
     baseline: EditorSaveBaseline(
       path: path,
       hash: node.hash!,
@@ -195,6 +465,7 @@ final class _FakeEditorSaveService implements EditorSaveService {
   final bool conflictFirst;
   final bool remoteUnknown;
   final choices = <EditorSaveChoice>[];
+  final savedBytes = <List<int>>[];
 
   @override
   Future<EditorConflictCheckResult> checkConflict(
@@ -218,6 +489,7 @@ final class _FakeEditorSaveService implements EditorSaveService {
     void Function(EditorSaveProgress progress)? onProgress,
   }) async {
     choices.add(choice);
+    savedBytes.add(List<int>.from(bytes));
     onProgress?.call(
       const EditorSaveProgress(
         phase: EditorSavePhase.uploading,
