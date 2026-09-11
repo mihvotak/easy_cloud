@@ -40,6 +40,23 @@ abstract interface class OfflineFileIndex {
   Future<void> close();
 }
 
+/// Optional transactional capability used when a remote editor save hands a
+/// newly verified object to an existing direct binding.
+///
+/// It is intentionally a separate capability rather than an unconditional
+/// `upsert`: callers must provide the expected old hash, and implementations
+/// must return false when the row disappeared or changed.  This keeps older
+/// read-only fakes useful while allowing SQLite to provide the production CAS
+/// race guarantee.
+abstract interface class ConditionalOfflineFileOwnership {
+  Future<bool> updateDirectIfMatches(
+    String email, {
+    required String path,
+    required String expectedHash,
+    required OfflineFileRecord replacement,
+  });
+}
+
 /// Durable storage required by target-aware download operations.
 ///
 /// Keeping this as a nominal capability prevents a download repository from

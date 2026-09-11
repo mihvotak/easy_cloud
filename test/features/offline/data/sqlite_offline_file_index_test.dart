@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:easy_cloud/features/offline/data/sqlite_offline_file_index.dart';
 import 'package:easy_cloud/features/offline/domain/offline_file_record.dart';
+import 'package:easy_cloud/features/offline/domain/offline_target.dart';
 import 'package:easy_cloud/local/cache/application_cache_root.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -227,6 +228,128 @@ void main() {
     expect(await index.hasHashReference('first@mail.ru', hash), isFalse);
     expect(await index.hasHashReference('second@mail.ru', hash), isTrue);
   });
+
+  test('conditional ownership updates only the captured direct row', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+    final index = _index(root);
+    addTearDown(() async {
+      await index.close();
+      await root.delete(recursive: true);
+    });
+    const oldHash = '00112233445566778899AABBCCDDEEFF00112233';
+    const newHash = 'AABBCCDDEEFF00112233445566778899AABBCCDD';
+    await index.upsert('user@mail.ru', _record('/note.txt', cachedAt: 1));
+
+    expect(
+      await index.updateDirectIfMatches(
+        'user@mail.ru',
+        path: '/note.txt',
+        expectedHash: oldHash,
+        replacement: OfflineFileRecord(
+          path: '/note.txt',
+          name: 'note.txt',
+          hash: newHash,
+          size: 2,
+          cachedAt: _time(2),
+        ),
+      ),
+      isTrue,
+    );
+    expect(
+      await index.updateDirectIfMatches(
+        'user@mail.ru',
+        path: '/note.txt',
+        expectedHash: oldHash,
+        replacement: OfflineFileRecord(
+          path: '/note.txt',
+          name: 'note.txt',
+          hash: oldHash,
+          size: 1,
+          cachedAt: _time(3),
+        ),
+      ),
+      isFalse,
+    );
+    expect((await index.list('user@mail.ru')).single.hash, newHash);
+  });
+
+  test(
+    'conditional target ownership requires the expected ready membership',
+    () async {
+      final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+      final index = _index(root);
+      addTearDown(() async {
+        await index.close();
+        await root.delete(recursive: true);
+      });
+      const oldHash = '00112233445566778899AABBCCDDEEFF00112233';
+      const newHash = 'AABBCCDDEEFF00112233445566778899AABBCCDD';
+      final now = _time(1);
+      await index.upsertTarget(
+        'user@mail.ru',
+        OfflineTargetRecord(
+          targetPath: '/docs',
+          targetIncarnation: 'incarnation-1',
+          targetName: 'docs',
+          state: OfflineTargetState.ready,
+          scanComplete: true,
+          estimateFiles: 1,
+          estimateBytes: 1,
+          estimateHasUnknown: false,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await index.upsertTargetFile(
+        'user@mail.ru',
+        OfflineTargetFileRecord(
+          targetPath: '/docs',
+          targetIncarnation: 'incarnation-1',
+          filePath: '/docs/note.txt',
+          name: 'note.txt',
+          hash: oldHash,
+          size: 1,
+          readiness: OfflineReadiness.ready,
+          bytesDone: 1,
+          updatedAt: now,
+        ),
+      );
+
+      expect(
+        await index.updateTargetFileIfMatches(
+          'user@mail.ru',
+          targetPath: '/docs',
+          targetIncarnation: 'incarnation-1',
+          filePath: '/docs/note.txt',
+          expectedHash: oldHash,
+          hash: newHash,
+          size: 2,
+        ),
+        isTrue,
+      );
+      expect(
+        await index.updateTargetFileIfMatches(
+          'user@mail.ru',
+          targetPath: '/docs',
+          targetIncarnation: 'incarnation-1',
+          filePath: '/docs/note.txt',
+          expectedHash: oldHash,
+          hash: oldHash,
+          size: 1,
+        ),
+        isFalse,
+      );
+      final membership = await index.getTargetFile(
+        'user@mail.ru',
+        '/docs',
+        '/docs/note.txt',
+        targetIncarnation: 'incarnation-1',
+      );
+      expect(membership?.hash, newHash);
+      expect(membership?.size, 2);
+      expect(membership?.readiness, OfflineReadiness.ready);
+    },
+  );
 
   test('serializes concurrent lazy opens and upserts', () async {
     final root = await Directory.systemTemp.createTemp('easy-cloud-offline');

@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:easy_cloud/cloud_mail/probe/cloud_hash.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/download/application/download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download.dart';
+import 'package:easy_cloud/features/editor/domain/editor_file.dart';
+import 'package:easy_cloud/features/editor/domain/editor_save.dart';
 import 'package:easy_cloud/features/open/application/file_opener.dart';
 import 'package:easy_cloud/features/open/application/open_file_controller.dart';
 import 'package:easy_cloud/features/open/domain/open_file_failure.dart';
@@ -188,6 +192,90 @@ void main() {
       opener.completePending();
       await firstOpen;
       await secondOpen;
+    },
+  );
+
+  test('prepares strict UTF-8 internally through startOpen only', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'easy-cloud-editor-open',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = <int>[0xef, 0xbb, 0xbf, ...utf8.encode('line\r\n🙂')];
+    final file = File('${root.path}/object');
+    await file.writeAsBytes(bytes);
+    final node = CloudNode(
+      path: '/docs/note.txt',
+      name: 'note.txt',
+      type: CloudNodeType.file,
+      size: bytes.length,
+      hash: calculateCloudHash(bytes),
+      modifiedAt: DateTime.utc(2026, 1, 2),
+      revision: 'rev-1',
+      globalRevision: 'grev-1',
+    );
+    final handle = _FakeDownloadHandle();
+    final repository = _FakeDownloadRepository([handle]);
+    final opener = _RecordingFileOpener();
+    final controller = OpenFileController(repository, opener);
+    addTearDown(controller.dispose);
+
+    final preparation = controller.prepareForEditor(node);
+    handle.complete(file);
+    final prepared = await preparation;
+
+    expect(prepared, isNotNull);
+    expect(prepared!.text, 'line\r\n🙂');
+    expect(prepared.hasUtf8Bom, isTrue);
+    expect(prepared.baseline.path, node.path);
+    expect(prepared.baseline.hash, node.hash);
+    expect(prepared.baseline.size, bytes.length);
+    expect(prepared.baseline.revision, 'rev-1');
+    expect(repository.openStarts, 1);
+    expect(repository.persistentStarts, 0);
+    expect(opener.paths, isEmpty);
+  });
+
+  test(
+    'rejects malformed UTF-8 and oversized bytes before editor push',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'easy-cloud-editor-open',
+      );
+      addTearDown(() => root.delete(recursive: true));
+
+      Future<EditorPreparationFailure> prepareFailure(List<int> bytes) async {
+        final file = File('${root.path}/${bytes.length}');
+        await file.writeAsBytes(bytes);
+        final node = CloudNode(
+          path: '/docs/note.txt',
+          name: 'note.txt',
+          type: CloudNodeType.file,
+          size: bytes.length,
+          hash: calculateCloudHash(bytes),
+        );
+        final handle = _FakeDownloadHandle();
+        final controller = OpenFileController(
+          _FakeDownloadRepository([handle]),
+          _RecordingFileOpener(),
+        );
+        addTearDown(controller.dispose);
+        final result = controller.prepareForEditor(node);
+        handle.complete(file);
+        try {
+          await result;
+        } on EditorPreparationFailure catch (failure) {
+          return failure;
+        }
+        fail('expected preparation failure');
+      }
+
+      final malformed = await prepareFailure(const [0xc3, 0x28]);
+      expect(malformed.type, EditorPreparationFailureType.malformedUtf8);
+
+      final oversized = await prepareFailure(
+        List<int>.filled(editorMaxBytes + 1, 0x61, growable: false),
+      );
+      expect(oversized.type, EditorPreparationFailureType.oversize);
     },
   );
 }

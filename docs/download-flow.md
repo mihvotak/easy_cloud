@@ -77,6 +77,23 @@ launched, Android cannot cancel that already-visible picker; its eventual
 callback is nevertheless ignored by the stale Dart attempt and cannot show a
 snackbar for the old action.
 
+## Internal text editor
+
+Supported final extensions are `txt`, `md`, `json`, `xml`, `yaml`, `yml`,
+`csv`, `log`, `ini`, and `conf` (case-insensitive). Browser and search rows
+prepare editor content through the same transient `startOpen` CAS path as an
+external open; preparation never creates an offline marker or invokes the
+platform opener. The verified bytes are decoded as strict UTF-8, with a
+leading UTF-8 BOM retained as metadata and all line endings left unchanged.
+The encoded payload, including a BOM, must not exceed 10485760 bytes (10 MiB).
+
+Saving captures the remote path, cloud hash, size, modification time, revision,
+and global revision. A fresh stat is compared before upload. If the remote file
+changed, the editor requires an explicit overwrite, adjacent-copy, or cancel
+choice. An unknown post-registration outcome stays dirty and is never retried
+automatically; a verified remote save may still report a local offline-ownership
+failure as a partial success.
+
 Successful online folder listings are stored as account-isolated paginated
 snapshot generations. A multi-page refresh is staged separately, so the last
 complete generation remains readable until its replacement is complete. On a

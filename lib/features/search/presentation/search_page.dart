@@ -8,6 +8,8 @@ import '../../browser/domain/cloud_node.dart';
 import '../../browser/presentation/browser_page.dart';
 import '../../browser/presentation/cloud_node_widgets.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../editor/application/editor_save_repository.dart';
+import '../../editor/presentation/editor_page.dart';
 import '../../offline/application/offline_file_index.dart';
 import '../../offline/application/offline_target_queue_controller.dart';
 import '../../offline/presentation/offline_availability_controller.dart';
@@ -23,6 +25,7 @@ final class SearchPage extends StatefulWidget {
     required this.authController,
     required this.downloadController,
     required this.openFileController,
+    this.editorSaveService,
     required this.offlineFileIndex,
     this.offlineTargetIndex,
     this.offlineTargetQueueController,
@@ -35,6 +38,7 @@ final class SearchPage extends StatefulWidget {
   final AuthController authController;
   final DownloadController downloadController;
   final OpenFileController openFileController;
+  final EditorSaveService? editorSaveService;
   final OfflineFileIndex offlineFileIndex;
   final OfflineTargetIndex? offlineTargetIndex;
   final OfflineTargetQueueController? offlineTargetQueueController;
@@ -281,6 +285,9 @@ final class _SearchPageState extends State<SearchPage> {
               ? null
               : () => _makeOnlyOnline(node),
           onSaveAs: node.isFolder ? null : () => _saveAs(node),
+          onOpenExternally: node.isFolder || !isEditableTextFile(node.name)
+              ? null
+              : () => _openExternally(node),
           offlinePolicy: _offlinePolicyFor(node),
           offlineReadiness: _offlineReadinessFor(node),
           progress: hasOpenProgress
@@ -305,6 +312,14 @@ final class _SearchPageState extends State<SearchPage> {
       _openBrowser(path: folder.path, title: folder.name);
 
   void _openFile(CloudNode node) {
+    if (isEditableTextFile(node.name) && widget.editorSaveService != null) {
+      unawaited(_openInEditor(node));
+      return;
+    }
+    _openExternally(node);
+  }
+
+  void _openExternally(CloudNode node) {
     unawaited(
       widget.openFileController
           .open(node)
@@ -315,6 +330,71 @@ final class _SearchPageState extends State<SearchPage> {
             },
           ),
     );
+  }
+
+  Future<void> _openInEditor(CloudNode node) async {
+    final account = widget.authController.session?.email.trim().toLowerCase();
+    try {
+      final prepared = await widget.openFileController.prepareForEditor(node);
+      if (!mounted || prepared == null) return;
+      final currentAccount = widget.authController.session?.email
+          .trim()
+          .toLowerCase();
+      if (widget.authController.status != AuthStatus.signedIn ||
+          account == null ||
+          currentAccount != account) {
+        return;
+      }
+      await Navigator.of(context).push<EditorSaveResult>(
+        MaterialPageRoute<EditorSaveResult>(
+          builder: (context) => EditorPage(
+            preparedFile: prepared,
+            editorSaveService: widget.editorSaveService!,
+            authController: widget.authController,
+            onSaved: _refreshAfterEditorSave,
+          ),
+        ),
+      );
+    } on EditorPreparationFailure catch (failure) {
+      if (!failure.isQuiet) _showEditorPreparationFailure(failure);
+    } catch (_) {
+      _showEditorPreparationFailure(
+        const EditorPreparationFailure(
+          EditorPreparationFailureType.service,
+          'Не удалось подготовить файл для встроенного редактора.',
+        ),
+      );
+    }
+  }
+
+  Future<void> _refreshAfterEditorSave(EditorSaveResult _) async {
+    if (!mounted) return;
+    final currentQuery = _controller.query;
+    if (currentQuery.isNotEmpty) await _controller.search(currentQuery);
+    if (mounted) await _reloadAvailability();
+  }
+
+  void _showEditorPreparationFailure(EditorPreparationFailure failure) {
+    if (!mounted) return;
+    final message = switch (failure.type) {
+      EditorPreparationFailureType.oversize =>
+        'Текстовый файл превышает лимит 10 МиБ.',
+      EditorPreparationFailureType.malformedUtf8 =>
+        'Файл содержит некорректный UTF-8.',
+      EditorPreparationFailureType.integrity =>
+        'Проверка содержимого файла не пройдена.',
+      EditorPreparationFailureType.invalidResponse =>
+        'Mail.ru вернул неполные метаданные файла.',
+      EditorPreparationFailureType.notFound => 'Удалённый файл недоступен.',
+      EditorPreparationFailureType.disk => 'Не удалось прочитать файл.',
+      EditorPreparationFailureType.service =>
+        'Не удалось подготовить файл для встроенного редактора.',
+      EditorPreparationFailureType.cancelled => '',
+    };
+    if (message.isEmpty) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _showFile(CloudNode file) => showCloudNodeMetadata(
@@ -438,6 +518,7 @@ final class _SearchPageState extends State<SearchPage> {
           searchRepository: widget.repository,
           downloadController: widget.downloadController,
           openFileController: widget.openFileController,
+          editorSaveService: widget.editorSaveService,
           offlineFileIndex: widget.offlineFileIndex,
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,

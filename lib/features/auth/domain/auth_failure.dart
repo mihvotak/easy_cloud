@@ -2,6 +2,7 @@ enum AuthFailureType {
   invalidCredentials,
   authRequired,
   network,
+  timeout,
   service,
   invalidResponse,
   secureStorage,

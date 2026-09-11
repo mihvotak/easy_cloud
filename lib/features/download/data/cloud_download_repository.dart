@@ -8,6 +8,7 @@ import '../../../features/auth/domain/auth_failure.dart';
 import '../../../features/auth/domain/cloud_session.dart';
 import '../../../features/browser/domain/cloud_node.dart';
 import '../../../local/cache/application_cache_root.dart';
+import '../../../local/cache/cloud_cache_coordinator.dart';
 import '../../../local/cache/content_addressed_file_cache.dart';
 import '../../offline/application/offline_file_index.dart';
 import '../application/download_repository.dart';
@@ -26,6 +27,7 @@ final class CloudDownloadRepository implements DownloadRepository {
     DownloadCacheFactory? cacheFactory,
     Directory? cacheRoot,
     CacheRootProvider? rootProvider,
+    required CloudCacheCoordinator coordinator,
   }) : _api = api,
        _transport = transport,
        _authRepository = authRepository,
@@ -40,7 +42,11 @@ final class CloudDownloadRepository implements DownloadRepository {
              email: email,
              root: cacheRoot,
              rootProvider: rootProvider,
-           )) {
+           )),
+       _coordinator = coordinator,
+       _targetCoordinator = coordinator,
+       _reconciliationCoordinator = coordinator,
+       _pruneCoordinator = coordinator {
     if (cacheFactory != null && (cacheRoot != null || rootProvider != null)) {
       throw ArgumentError(
         'cacheFactory cannot be combined with cacheRoot or rootProvider.',
@@ -64,13 +70,10 @@ final class CloudDownloadRepository implements DownloadRepository {
   final _activeTargetRemovals = <_TrackedRepositoryOperation>{};
   final _activeReconciliations = <_TrackedRepositoryOperation>{};
   Future<void>? _closeFuture;
-  static final _sharedCoordinator = _DownloadCoordinator();
-  static final _sharedTargetCoordinator = _DownloadCoordinator();
-  static final _sharedReconciliationCoordinator = _DownloadCoordinator();
-  final _coordinator = _sharedCoordinator;
-  final _targetCoordinator = _sharedTargetCoordinator;
-  final _reconciliationCoordinator = _sharedReconciliationCoordinator;
-  final _pruneCoordinator = _DownloadCoordinator();
+  final CloudCacheCoordinator _coordinator;
+  final CloudCacheCoordinator _targetCoordinator;
+  final CloudCacheCoordinator _reconciliationCoordinator;
+  final CloudCacheCoordinator _pruneCoordinator;
 
   @override
   DownloadHandle start(CloudNode node) {
@@ -230,70 +233,88 @@ final class CloudDownloadRepository implements DownloadRepository {
     final operation = _TrackedRepositoryOperation();
     final cancellation = operation.cancellation;
     _activeOfflineRemovals.add(operation);
+    void Function()? releasePath;
 
     try {
       final scope = _sessionForRemoval();
       _ensureRemovalSession(scope, cancellation);
-      final initialRecord = await _lookupOfflineRecord(
-        scope,
-        path: path,
-        cancellation: cancellation,
+      final cache = _cacheFactory(scope.session.email);
+      // Keep the path lease across lookup, ownership removal, and filesystem
+      // cleanup.  A stale remover must not delete a replacement published by
+      // an editor or direct download after its initial lookup.
+      releasePath = await _coordinator.acquire(
+        cloudCachePathKey(cache.accountDirectoryName, path),
+        cancellation,
+        kind: CloudCacheLockKind.path,
       );
-      if (initialRecord == null) return;
-      var record = initialRecord;
-
-      while (true) {
-        _ensureRemovalSession(scope, cancellation);
-        final cache = _cacheFactory(scope.session.email);
-        final release = await _coordinator.acquire(
-          '${cache.accountDirectoryName}:${record.hash}',
-          cancellation,
+      try {
+        final initialRecord = await _lookupOfflineRecord(
+          scope,
+          path: path,
+          cancellation: cancellation,
         );
-        try {
-          _ensureRemovalSession(scope, cancellation);
-          final current = await _lookupOfflineRecord(
-            scope,
-            path: path,
-            cancellation: cancellation,
-          );
-          if (current == null) return;
-          if (current.hash != record.hash) {
-            // The binding changed while waiting for the hash lock. Acquire
-            // the coordinator for the new object before mutating anything.
-            record = current;
-            continue;
-          }
+        if (initialRecord == null) return;
+        var record = initialRecord;
 
+        while (true) {
           _ensureRemovalSession(scope, cancellation);
-          await _offlineFileIndex.remove(scope.session.email, path);
-          _ensureRemovalSession(scope, cancellation);
-
-          final hasReference = await _offlineFileIndex.hasHashReference(
-            scope.session.email,
-            current.hash,
+          final release = await _coordinator.acquire(
+            cloudCacheHashKey(
+              cache.accountDirectoryName,
+              normalizeCloudHash(record.hash),
+            ),
+            cancellation,
+            kind: CloudCacheLockKind.hash,
           );
-          _ensureRemovalSession(scope, cancellation);
-          final hasTransientReference = await _hasTransientReference(
-            scope.session.email,
-            current.hash,
-          );
-          _ensureRemovalSession(scope, cancellation);
-          if (!hasReference && !hasTransientReference) {
+          try {
             _ensureRemovalSession(scope, cancellation);
-            try {
-              await _discardOfflineObject(cache, current.hash);
-            } catch (_) {
-              // Prefer the epoch/cancellation result when cleanup raced a
-              // session change; otherwise preserve the safe disk failure.
-              _ensureRemovalSession(scope, cancellation);
-              rethrow;
+            final current = await _lookupOfflineRecord(
+              scope,
+              path: path,
+              cancellation: cancellation,
+            );
+            if (current == null) return;
+            if (current.hash != record.hash) {
+              // The binding changed while waiting for the hash lock. Acquire
+              // the coordinator for the new object before mutating anything.
+              record = current;
+              continue;
             }
+
             _ensureRemovalSession(scope, cancellation);
+            await _offlineFileIndex.remove(scope.session.email, path);
+            _ensureRemovalSession(scope, cancellation);
+
+            final hasReference = await _offlineFileIndex.hasHashReference(
+              scope.session.email,
+              current.hash,
+            );
+            _ensureRemovalSession(scope, cancellation);
+            final hasTransientReference = await _hasTransientReference(
+              scope.session.email,
+              current.hash,
+            );
+            _ensureRemovalSession(scope, cancellation);
+            if (!hasReference && !hasTransientReference) {
+              _ensureRemovalSession(scope, cancellation);
+              try {
+                await _discardOfflineObject(cache, current.hash);
+              } catch (_) {
+                // Prefer the epoch/cancellation result when cleanup raced a
+                // session change; otherwise preserve the safe disk failure.
+                _ensureRemovalSession(scope, cancellation);
+                rethrow;
+              }
+              _ensureRemovalSession(scope, cancellation);
+            }
+            return;
+          } finally {
+            release();
           }
-          return;
-        } finally {
-          release();
         }
+      } finally {
+        releasePath();
+        releasePath = null;
       }
     } finally {
       try {
@@ -321,6 +342,7 @@ final class CloudDownloadRepository implements DownloadRepository {
     final operation = _TrackedRepositoryOperation();
     final cancellation = operation.cancellation;
     _activeTargetRemovals.add(operation);
+    final pathReleases = <void Function()>[];
     final hashReleases = <void Function()>[];
     void Function()? releaseTarget;
 
@@ -336,6 +358,7 @@ final class CloudDownloadRepository implements DownloadRepository {
       final targetRelease = await _targetCoordinator.acquire(
         _targetCoordinatorKey(cache, normalizedTargetPath),
         cancellation,
+        kind: CloudCacheLockKind.target,
       );
       releaseTarget = targetRelease;
 
@@ -359,14 +382,28 @@ final class CloudDownloadRepository implements DownloadRepository {
           if (file.hasValidHash) file.hash!,
       }.toList()..sort();
 
-      // The target lock is held for the whole logical operation. Acquire hash
-      // locks only after it, matching target-download lock order.
+      // The target lock is held for the whole logical operation. Acquire all
+      // affected path locks in deterministic order, then all hash locks. This
+      // is the same target -> path -> hash order used by target downloads and
+      // editor ownership hand-offs.
+      final paths = files.map((file) => file.filePath).toSet().toList()..sort();
+      for (final path in paths) {
+        _ensureRemovalSession(scope, cancellation);
+        pathReleases.add(
+          await _coordinator.acquire(
+            cloudCachePathKey(cache.accountDirectoryName, path),
+            cancellation,
+            kind: CloudCacheLockKind.path,
+          ),
+        );
+      }
       for (final hash in hashes) {
         _ensureRemovalSession(scope, cancellation);
         hashReleases.add(
           await _coordinator.acquire(
-            _coordinatorKey(cache, hash),
+            cloudCacheHashKey(cache.accountDirectoryName, hash),
             cancellation,
+            kind: CloudCacheLockKind.hash,
           ),
         );
       }
@@ -421,10 +458,13 @@ final class CloudDownloadRepository implements DownloadRepository {
         targetIncarnation: normalizedIncarnation,
       );
     } finally {
-      releaseTarget?.call();
       for (final release in hashReleases.reversed) {
         release();
       }
+      for (final release in pathReleases.reversed) {
+        release();
+      }
+      releaseTarget?.call();
       try {
         await cancellation.close();
       } finally {
@@ -500,30 +540,31 @@ final class CloudDownloadRepository implements DownloadRepository {
       }
 
       final releaseAccount = await _reconciliationCoordinator.acquire(
-        'account:$expectedAccountKey',
+        cloudCacheAccountKey(expectedAccountKey),
         operation.cancellation,
+        kind: CloudCacheLockKind.account,
       );
       try {
         _ensureReconciliationSession(scope, operation.cancellation);
         late final List<CacheObjectCandidate> candidates;
         try {
           candidates = await cache.enumerateFinalObjects();
-        } catch (error) {
+        } catch (_) {
           _ensureReconciliationSession(scope, operation.cancellation);
           throw DownloadFailure(
             DownloadFailureType.disk,
             'Не удалось просмотреть офлайн-кэш.',
-            cause: error,
           );
         }
         _ensureReconciliationSession(scope, operation.cancellation);
 
-        final failures = <_ReconciliationIssue>[];
+        var failureCount = 0;
         for (final candidate in candidates) {
           _ensureReconciliationSession(scope, operation.cancellation);
           final releaseHash = await _coordinator.acquire(
-            _coordinatorKey(cache, candidate.hash),
+            cloudCacheHashKey(cache.accountDirectoryName, candidate.hash),
             operation.cancellation,
+            kind: CloudCacheLockKind.hash,
           );
           try {
             await _reconcileCandidate(
@@ -532,27 +573,21 @@ final class CloudDownloadRepository implements DownloadRepository {
               candidate: candidate,
               cancellation: operation.cancellation,
             );
-          } catch (error, stackTrace) {
-            if (error is DownloadCancelled) rethrow;
+          } on DownloadCancelled {
+            rethrow;
+          } catch (_) {
             _ensureReconciliationSession(scope, operation.cancellation);
-            failures.add(
-              _ReconciliationIssue(
-                hash: candidate.hash,
-                error: error,
-                stackTrace: stackTrace,
-              ),
-            );
+            failureCount += 1;
           } finally {
             releaseHash();
           }
         }
 
         _ensureReconciliationSession(scope, operation.cancellation);
-        if (failures.isNotEmpty) {
+        if (failureCount > 0) {
           throw DownloadFailure(
             DownloadFailureType.disk,
             'Не удалось полностью очистить офлайн-кэш.',
-            cause: List.unmodifiable(failures),
           );
         }
       } finally {
@@ -761,8 +796,9 @@ final class CloudDownloadRepository implements DownloadRepository {
     final index = _transientObjectIndex;
     if (index == null) return;
     final release = await _pruneCoordinator.acquire(
-      'account:${account.accountKey}',
+      cloudCacheAccountKey(account.accountKey),
       cancellation,
+      kind: CloudCacheLockKind.account,
     );
     try {
       cancellation.throwIfCancelled();
@@ -791,8 +827,9 @@ final class CloudDownloadRepository implements DownloadRepository {
         cancellation.throwIfCancelled();
 
         final releaseHash = await _coordinator.acquire(
-          _coordinatorKey(cache, candidate.hash),
+          cloudCacheHashKey(cache.accountDirectoryName, candidate.hash),
           cancellation,
+          kind: CloudCacheLockKind.hash,
         );
         try {
           cancellation.throwIfCancelled();
@@ -891,13 +928,10 @@ final class CloudDownloadRepository implements DownloadRepository {
         protectedOpen.hash == normalizeCloudHash(hash);
   }
 
-  String _coordinatorKey(ContentAddressedFileCache cache, String hash) =>
-      '${cache.accountDirectoryName}:${normalizeCloudHash(hash)}';
-
   String _targetCoordinatorKey(
     ContentAddressedFileCache cache,
     String targetPath,
-  ) => '${cache.accountDirectoryName}:target:$targetPath';
+  ) => cloudCacheTargetKey(cache.accountDirectoryName, targetPath);
 
   _DownloadSessionScope _sessionForRemoval([String? expectedEmail]) {
     final session = _authRepository.currentSession;
@@ -1039,8 +1073,8 @@ final class _DownloadOperation {
   final OfflineFileIndex offlineFileIndex;
   final OfflineTargetIndex targetIndex;
   final DownloadCacheFactory cacheFactory;
-  final _DownloadCoordinator coordinator;
-  final _DownloadCoordinator targetCoordinator;
+  final CloudCacheCoordinator coordinator;
+  final CloudCacheCoordinator targetCoordinator;
   final Future<void> Function(
     _DownloadSessionScope,
     _DownloadMetadata,
@@ -1058,6 +1092,7 @@ final class _DownloadOperation {
   final _progress = StreamController<DownloadProgress>.broadcast(sync: true);
   final _result = Completer<File>();
   final _completion = Completer<void>();
+  CloudNode? _verifiedNode;
 
   late final DownloadHandle handle;
   StreamSubscription<CloudSession?>? _sessionSubscription;
@@ -1100,14 +1135,7 @@ final class _DownloadOperation {
         case _DownloadMode.open:
           await _runOpen(scope);
         case _DownloadMode.direct:
-          final freshNode = await _statAndValidate(scope, node.path);
-          final metadata = _validatedMetadata(freshNode);
-          await _runWithMetadata(
-            scope,
-            remoteNode: freshNode,
-            metadata: metadata,
-            existingBinding: null,
-          );
+          await _runDirect(scope);
         case _DownloadMode.target:
           await _runTarget(scope);
       }
@@ -1169,17 +1197,37 @@ final class _DownloadOperation {
     final path = normalizeOfflineRemotePath(node.path);
     final direct = await _lookupOpenRecord(scope, path);
     if (direct != null && _matchesDirectRecord(node, direct)) {
-      _ensureOperationSession(scope);
-      final current = await _lookupOpenRecord(scope, path);
-      if (current != null &&
-          current.hash == direct.hash &&
-          _matchesDirectRecord(node, current)) {
-        await _runWithMetadata(
-          scope,
-          remoteNode: _nodeForBinding(current),
-          metadata: _metadataForRecord(current),
-          existingBinding: current,
-        );
+      final cache = cacheFactory(scope.session.email);
+      // A direct binding may need repair, so serialize its entire open path
+      // with editor save, direct download, and removeOffline. Re-read after
+      // taking the lease because the initial lookup was only a hint.
+      final releasePath = await coordinator.acquire(
+        cloudCachePathKey(cache.accountDirectoryName, path),
+        cancellation,
+        kind: CloudCacheLockKind.path,
+      );
+      _MetadataRunResult? prepared;
+      try {
+        _ensureOperationSession(scope);
+        final current = await _lookupOpenRecord(scope, path);
+        if (current != null &&
+            current.hash == direct.hash &&
+            _matchesDirectRecord(node, current)) {
+          prepared = await _runWithMetadata(
+            scope,
+            cacheOverride: cache,
+            remoteNode: _nodeForBinding(current),
+            metadata: _metadataForRecord(current),
+            existingBinding: current,
+          );
+        }
+      } finally {
+        releasePath();
+      }
+      if (prepared != null) {
+        await onOpenPrepared!(scope, prepared.metadata, cancellation);
+        _ensureOperationSession(scope);
+        _succeed(prepared.file);
         return;
       }
     }
@@ -1196,12 +1244,50 @@ final class _DownloadOperation {
 
     final freshNode = await _statAndValidate(scope, node.path);
     final metadata = _validatedMetadata(freshNode);
-    await _runWithMetadata(
+    final prepared = await _runWithMetadata(
       scope,
       remoteNode: freshNode,
       metadata: metadata,
       existingBinding: null,
     );
+    await onOpenPrepared!(scope, prepared.metadata, cancellation);
+    _ensureOperationSession(scope);
+    _succeed(prepared.file);
+  }
+
+  Future<void> _runDirect(_DownloadSessionScope scope) async {
+    final path = _canonicalPathOrNull(node.path);
+    if (path == null) {
+      throw const DownloadFailure(
+        DownloadFailureType.invalidResponse,
+        'Путь удалённого файла недействителен.',
+      );
+    }
+    final cache = cacheFactory(scope.session.email);
+    // Direct downloads can replace the binding at the end of the operation.
+    // Hold the path lease from fresh stat through cache commit and index
+    // publication so a stale operation cannot overwrite an editor result.
+    final releasePath = await coordinator.acquire(
+      cloudCachePathKey(cache.accountDirectoryName, path),
+      cancellation,
+      kind: CloudCacheLockKind.path,
+    );
+    try {
+      _ensureOperationSession(scope);
+      final freshNode = await _statAndValidate(scope, node.path);
+      final metadata = _validatedMetadata(freshNode);
+      final prepared = await _runWithMetadata(
+        scope,
+        cacheOverride: cache,
+        remoteNode: freshNode,
+        metadata: metadata,
+        existingBinding: null,
+      );
+      _ensureOperationSession(scope);
+      _succeed(prepared.file);
+    } finally {
+      releasePath();
+    }
   }
 
   Future<void> _runInheritedOpen(
@@ -1210,9 +1296,11 @@ final class _DownloadOperation {
   ) async {
     final cache = cacheFactory(scope.session.email);
     final release = await targetCoordinator.acquire(
-      '${cache.accountDirectoryName}:target:${selected.targetPath}',
+      cloudCacheTargetKey(cache.accountDirectoryName, selected.targetPath),
       cancellation,
+      kind: CloudCacheLockKind.target,
     );
+    late final _MetadataRunResult prepared;
     try {
       _ensureOperationSession(scope);
       final current = await targetIndex.getTargetFile(
@@ -1234,27 +1322,42 @@ final class _DownloadOperation {
       }
 
       final metadata = _metadataForTargetMembership(current);
-      await _runWithMetadata(
-        scope,
-        remoteNode: _nodeForTargetMembership(current),
-        metadata: metadata,
-        existingBinding: null,
-        openTargetMembership: current,
-        repairOpenTargetMembership: false,
-        onCacheMiss: () async {
-          // A target membership is an offline hint only. If its CAS object is
-          // absent or corrupt, obtain fresh metadata before repairing the
-          // membership through target ownership semantics.
-          final freshNode = await _statAndValidate(scope, node.path);
-          return _DownloadMetadataResolution(
-            remoteNode: freshNode,
-            metadata: _validatedMetadata(freshNode),
-          );
-        },
+      // Keep the path lease even for a cache hit: the object can become
+      // corrupt between a preliminary check and the actual read/repair.
+      final releasePath = await coordinator.acquire(
+        cloudCachePathKey(cache.accountDirectoryName, current.filePath),
+        cancellation,
+        kind: CloudCacheLockKind.path,
       );
+      try {
+        prepared = await _runWithMetadata(
+          scope,
+          cacheOverride: cache,
+          remoteNode: _nodeForTargetMembership(current),
+          metadata: metadata,
+          existingBinding: null,
+          openTargetMembership: current,
+          repairOpenTargetMembership: false,
+          onCacheMiss: () async {
+            // A target membership is an offline hint only. If its CAS object is
+            // absent or corrupt, obtain fresh metadata before repairing the
+            // membership through target ownership semantics.
+            final freshNode = await _statAndValidate(scope, node.path);
+            return _DownloadMetadataResolution(
+              remoteNode: freshNode,
+              metadata: _validatedMetadata(freshNode),
+            );
+          },
+        );
+      } finally {
+        releasePath();
+      }
     } finally {
       release();
     }
+    await onOpenPrepared!(scope, prepared.metadata, cancellation);
+    _ensureOperationSession(scope);
+    _succeed(prepared.file);
   }
 
   Future<void> _runTarget(_DownloadSessionScope scope) async {
@@ -1274,9 +1377,11 @@ final class _DownloadOperation {
     }
     final cache = cacheFactory(scope.session.email);
     final release = await targetCoordinator.acquire(
-      '${cache.accountDirectoryName}:target:$target',
+      cloudCacheTargetKey(cache.accountDirectoryName, target),
       cancellation,
+      kind: CloudCacheLockKind.target,
     );
+    late final _MetadataRunResult prepared;
     try {
       _ensureOperationSession(scope);
       final currentTarget = await targetIndex.getTarget(
@@ -1290,39 +1395,61 @@ final class _DownloadOperation {
         throw const DownloadCancelled();
       }
 
-      final freshNode = await _statAndValidate(scope, node.path);
-      final freshPath = _canonicalPathOrNull(freshNode.path);
-      if (freshPath == null || !_isFileUnderTarget(target, freshPath)) {
+      final requestedPath = _canonicalPathOrNull(node.path);
+      if (requestedPath == null) {
         throw const DownloadFailure(
           DownloadFailureType.invalidResponse,
-          'Файл не принадлежит указанной офлайн-цели.',
+          'Путь удалённого файла недействителен.',
         );
       }
-      final metadata = _validatedMetadata(freshNode);
-      final membership = await targetIndex.getTargetFile(
-        scope.session.email,
-        target,
-        freshPath,
-        targetIncarnation: expectedIncarnation,
+      // Target operations acquire target -> path -> hash. Holding the path
+      // lease through stat, CAS commit, and membership publication prevents a
+      // concurrent editor or removal from observing a half hand-off.
+      final releasePath = await coordinator.acquire(
+        cloudCachePathKey(cache.accountDirectoryName, requestedPath),
+        cancellation,
+        kind: CloudCacheLockKind.path,
       );
-      _ensureOperationSession(scope);
-      if (membership == null ||
-          membership.targetPath != target ||
-          membership.targetIncarnation != expectedIncarnation ||
-          membership.filePath != freshPath) {
-        throw const DownloadCancelled();
-      }
+      try {
+        final freshNode = await _statAndValidate(scope, node.path);
+        final freshPath = _canonicalPathOrNull(freshNode.path);
+        if (freshPath == null || !_isFileUnderTarget(target, freshPath)) {
+          throw const DownloadFailure(
+            DownloadFailureType.invalidResponse,
+            'Файл не принадлежит указанной офлайн-цели.',
+          );
+        }
+        final metadata = _validatedMetadata(freshNode);
+        final membership = await targetIndex.getTargetFile(
+          scope.session.email,
+          target,
+          freshPath,
+          targetIncarnation: expectedIncarnation,
+        );
+        _ensureOperationSession(scope);
+        if (membership == null ||
+            membership.targetPath != target ||
+            membership.targetIncarnation != expectedIncarnation ||
+            membership.filePath != freshPath) {
+          throw const DownloadCancelled();
+        }
 
-      await _runWithMetadata(
-        scope,
-        remoteNode: freshNode,
-        metadata: metadata,
-        existingBinding: null,
-        targetMembership: membership,
-      );
+        prepared = await _runWithMetadata(
+          scope,
+          cacheOverride: cache,
+          remoteNode: freshNode,
+          metadata: metadata,
+          existingBinding: null,
+          targetMembership: membership,
+        );
+      } finally {
+        releasePath();
+      }
     } finally {
       release();
     }
+    _ensureOperationSession(scope);
+    _succeed(prepared.file);
   }
 
   Future<OfflineFileRecord?> _lookupOpenRecord(
@@ -1420,8 +1547,9 @@ final class _DownloadOperation {
     return freshNode;
   }
 
-  Future<void> _runWithMetadata(
+  Future<_MetadataRunResult> _runWithMetadata(
     _DownloadSessionScope scope, {
+    ContentAddressedFileCache? cacheOverride,
     required CloudNode remoteNode,
     required _DownloadMetadata metadata,
     OfflineFileRecord? existingBinding,
@@ -1430,7 +1558,7 @@ final class _DownloadOperation {
     bool repairOpenTargetMembership = false,
     Future<_DownloadMetadataResolution> Function()? onCacheMiss,
   }) async {
-    final cache = cacheFactory(scope.session.email);
+    final cache = cacheOverride ?? cacheFactory(scope.session.email);
     var currentRemoteNode = remoteNode;
     var currentMetadata = metadata;
     var currentRepairOpenTargetMembership = repairOpenTargetMembership;
@@ -1438,8 +1566,9 @@ final class _DownloadOperation {
     late final File object;
     while (true) {
       final release = await coordinator.acquire(
-        _coordinatorKey(cache, currentMetadata.hash),
+        cloudCacheHashKey(cache.accountDirectoryName, currentMetadata.hash),
         cancellation,
+        kind: CloudCacheLockKind.hash,
       );
       late final _MetadataAttempt attempt;
       try {
@@ -1471,11 +1600,9 @@ final class _DownloadOperation {
       }
       break;
     }
-    if (mode == _DownloadMode.open) {
-      await onOpenPrepared!(scope, currentMetadata, cancellation);
-    }
+    _verifiedNode = currentRemoteNode;
     _ensureOperationSession(scope);
-    _succeed(object);
+    return _MetadataRunResult(file: object, metadata: currentMetadata);
   }
 
   Future<_MetadataAttempt> _runWithMetadataUnderLock(
@@ -1817,19 +1944,15 @@ final class _DownloadOperation {
       _ensureSession(scope);
       return scope;
     } on AuthFailure catch (failure) {
-      throw DownloadFailure(
-        switch (failure.type) {
-          AuthFailureType.network => DownloadFailureType.network,
-          AuthFailureType.authRequired || AuthFailureType.invalidCredentials =>
-            DownloadFailureType.authRequired,
-          AuthFailureType.invalidResponse =>
-            DownloadFailureType.invalidResponse,
-          AuthFailureType.service ||
-          AuthFailureType.secureStorage => DownloadFailureType.service,
-        },
-        failure.message,
-        cause: failure,
-      );
+      throw DownloadFailure(switch (failure.type) {
+        AuthFailureType.network => DownloadFailureType.network,
+        AuthFailureType.timeout => DownloadFailureType.timeout,
+        AuthFailureType.authRequired ||
+        AuthFailureType.invalidCredentials => DownloadFailureType.authRequired,
+        AuthFailureType.invalidResponse => DownloadFailureType.invalidResponse,
+        AuthFailureType.service ||
+        AuthFailureType.secureStorage => DownloadFailureType.service,
+      }, failure.message);
     }
   }
 
@@ -1862,19 +1985,15 @@ final class _DownloadOperation {
       _ensureSession(scope);
       return scope;
     } on AuthFailure catch (failure) {
-      throw DownloadFailure(
-        switch (failure.type) {
-          AuthFailureType.network => DownloadFailureType.network,
-          AuthFailureType.authRequired || AuthFailureType.invalidCredentials =>
-            DownloadFailureType.authRequired,
-          AuthFailureType.invalidResponse =>
-            DownloadFailureType.invalidResponse,
-          AuthFailureType.service ||
-          AuthFailureType.secureStorage => DownloadFailureType.service,
-        },
-        failure.message,
-        cause: failure,
-      );
+      throw DownloadFailure(switch (failure.type) {
+        AuthFailureType.network => DownloadFailureType.network,
+        AuthFailureType.timeout => DownloadFailureType.timeout,
+        AuthFailureType.authRequired ||
+        AuthFailureType.invalidCredentials => DownloadFailureType.authRequired,
+        AuthFailureType.invalidResponse => DownloadFailureType.invalidResponse,
+        AuthFailureType.service ||
+        AuthFailureType.secureStorage => DownloadFailureType.service,
+      }, failure.message);
     }
   }
 
@@ -1961,9 +2080,6 @@ final class _DownloadOperation {
   bool _sameHash(String actual, String expected) =>
       actual.trim().toUpperCase() == expected;
 
-  String _coordinatorKey(ContentAddressedFileCache cache, String hash) =>
-      '${cache.accountDirectoryName}:${normalizeCloudHash(hash)}';
-
   Future<void> _deleteQuietly(File file) async {
     try {
       if (await file.exists()) await file.delete();
@@ -1978,6 +2094,9 @@ final class _DownloadOperation {
   }
 
   File _succeed(File file) {
+    if (handle case final VerifiedDownloadHandle verified) {
+      verified.verifiedNode = _verifiedNode;
+    }
     if (!_result.isCompleted) _result.complete(file);
     return file;
   }
@@ -2003,25 +2122,13 @@ final class _TrackedRepositoryOperation {
   }
 }
 
-final class _ReconciliationIssue {
-  const _ReconciliationIssue({
-    required this.hash,
-    required this.error,
-    required this.stackTrace,
-  });
-
-  final String hash;
-  final Object error;
-  final StackTrace stackTrace;
-}
-
 final class _ReconciliationReferenceFailure implements Exception {
   const _ReconciliationReferenceFailure(this.errors);
 
   final List<Object> errors;
 }
 
-final class _DownloadHandle implements DownloadHandle {
+final class _DownloadHandle implements VerifiedDownloadHandle {
   _DownloadHandle({
     required this.progress,
     required this.result,
@@ -2033,6 +2140,9 @@ final class _DownloadHandle implements DownloadHandle {
 
   @override
   final Future<File> result;
+
+  @override
+  CloudNode? verifiedNode;
 
   final void Function() _onCancel;
 
@@ -2047,6 +2157,13 @@ final class _DownloadMetadata {
 
   final int size;
   final String hash;
+}
+
+final class _MetadataRunResult {
+  const _MetadataRunResult({required this.file, required this.metadata});
+
+  final File file;
+  final _DownloadMetadata metadata;
 }
 
 final class _DownloadMetadataResolution {
@@ -2102,97 +2219,6 @@ final class _ProtectedOpen {
 }
 
 enum _TransientObjectState { missing, file, other }
-
-final class _DownloadCoordinator {
-  final _tails = <String, _DownloadCoordinatorGate>{};
-
-  Future<void Function()> acquire(
-    String key,
-    DownloadCancellationToken cancellation,
-  ) async {
-    final previous = _tails[key];
-    final gate = _DownloadCoordinatorGate();
-    _tails[key] = gate;
-    try {
-      await _waitForTurn(previous?.future, cancellation);
-      cancellation.throwIfCancelled();
-    } catch (_) {
-      gate.open();
-      if (identical(_tails[key], gate)) {
-        if (previous == null || previous.isOpen) {
-          _tails.remove(key);
-        } else {
-          // Keep the preceding owner as the tail. Otherwise a new operation
-          // could bypass a still-running writer after this waiter cancels.
-          _tails[key] = previous;
-        }
-      }
-      rethrow;
-    }
-
-    var released = false;
-    return () {
-      if (released) return;
-      released = true;
-      gate.open();
-      if (identical(_tails[key], gate)) _tails.remove(key);
-    };
-  }
-
-  Future<void> _waitForTurn(
-    Future<void>? previous,
-    DownloadCancellationToken cancellation,
-  ) async {
-    cancellation.throwIfCancelled();
-    if (previous == null) return;
-
-    final settled = Completer<void>();
-    var completed = false;
-
-    void complete() {
-      if (completed) return;
-      completed = true;
-      settled.complete();
-    }
-
-    void completeError(Object error, StackTrace stackTrace) {
-      if (completed) return;
-      completed = true;
-      settled.completeError(error, stackTrace);
-    }
-
-    final subscription = cancellation.cancellations.listen((_) {
-      completeError(const DownloadCancelled(), StackTrace.current);
-    });
-    unawaited(
-      previous.then<void>(
-        (_) => complete(),
-        onError: (Object error, StackTrace stackTrace) {
-          completeError(error, stackTrace);
-        },
-      ),
-    );
-
-    try {
-      await settled.future;
-    } finally {
-      await subscription.cancel();
-    }
-  }
-}
-
-final class _DownloadCoordinatorGate {
-  final _completer = Completer<void>();
-  bool isOpen = false;
-
-  Future<void> get future => _completer.future;
-
-  void open() {
-    if (isOpen) return;
-    isOpen = true;
-    _completer.complete();
-  }
-}
 
 bool _isFileUnderTarget(String targetPath, String filePath) {
   if (filePath == '/' || filePath == targetPath) return false;

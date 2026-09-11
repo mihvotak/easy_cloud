@@ -7,8 +7,10 @@ import '../../browser/application/browser_repository.dart';
 import '../../browser/presentation/browser_page.dart';
 import '../../download/application/download_repository.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../editor/application/editor_save_repository.dart';
 import '../../offline/application/offline_file_index.dart';
 import '../../offline/application/offline_target_queue_controller.dart';
+import '../../../local/cache/cloud_cache_coordinator.dart';
 import '../../open/application/file_opener.dart';
 import '../../open/application/open_file_controller.dart';
 import '../../search/application/search_repository.dart';
@@ -21,6 +23,8 @@ final class AuthGate extends StatefulWidget {
     required this.browserRepository,
     required this.searchRepository,
     required this.downloadRepository,
+    required this.cacheCoordinator,
+    required this.editorSaveRepository,
     required this.offlineFileIndex,
     required this.offlineTargetIndex,
     required this.offlineTargetQueueStore,
@@ -33,6 +37,8 @@ final class AuthGate extends StatefulWidget {
   final BrowserRepository browserRepository;
   final SearchRepository searchRepository;
   final DownloadRepository downloadRepository;
+  final CloudCacheCoordinator cacheCoordinator;
+  final EditorSaveService editorSaveRepository;
   final OfflineFileIndex offlineFileIndex;
   final OfflineTargetIndex offlineTargetIndex;
   final OfflineTargetQueueStore offlineTargetQueueStore;
@@ -207,9 +213,19 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
 
     _offlineTargetQueueController.dispose();
     try {
+      await widget.editorSaveRepository.close();
+    } catch (_) {
+      // Continue closing the download and shared cloud resources.
+    }
+    try {
       await widget.downloadRepository.close();
     } catch (_) {
       // Continue closing the remaining independently owned resources.
+    }
+    try {
+      await widget.cacheCoordinator.close();
+    } catch (_) {
+      // Continue closing the independently owned repositories and index.
     }
     try {
       widget.browserRepository.close();
@@ -235,6 +251,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         searchRepository: widget.searchRepository,
         downloadController: _downloadController,
         openFileController: _openFileController,
+        editorSaveService: widget.editorSaveRepository,
         offlineFileIndex: widget.offlineFileIndex,
         offlineTargetIndex: widget.offlineTargetIndex,
         offlineTargetQueueController: _offlineTargetQueueController,

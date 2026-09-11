@@ -248,6 +248,42 @@ void main() {
     expect(_menuItem(tester, 'Только онлайн').enabled, isFalse);
   });
 
+  testWidgets('adds external open only for supported text files', (
+    tester,
+  ) async {
+    var externalCalls = 0;
+    const textNode = CloudNode(
+      path: '/notes/README.MD',
+      name: 'README.MD',
+      type: CloudNodeType.file,
+    );
+    await _pumpTile(
+      tester,
+      node: textNode,
+      availability: OfflineAvailability.onlineOnly,
+      onOpenExternally: () => externalCalls++,
+    );
+    await _openMenu(tester, textNode);
+    expect(find.text('Открыть вовне'), findsOneWidget);
+    await tester.tap(find.text('Открыть вовне'));
+    await tester.pumpAndSettle();
+    expect(externalCalls, 1);
+
+    const unsupported = CloudNode(
+      path: '/notes/README.pdf',
+      name: 'README.pdf',
+      type: CloudNodeType.file,
+    );
+    await _pumpTile(
+      tester,
+      node: unsupported,
+      availability: OfflineAvailability.onlineOnly,
+      onOpenExternally: () => externalCalls++,
+    );
+    await _openMenu(tester, unsupported);
+    expect(find.text('Открыть вовне'), findsNothing);
+  });
+
   testWidgets(
     'allows direct folder removal but keeps inherited removal disabled',
     (tester) async {
@@ -364,6 +400,7 @@ Future<void> _pumpTile(
   VoidCallback? onWorkOffline,
   VoidCallback? onOnlyOnline,
   VoidCallback? onSaveAs,
+  VoidCallback? onOpenExternally,
   VoidCallback? onTap,
 }) async {
   await tester.pumpWidget(
@@ -376,6 +413,7 @@ Future<void> _pumpTile(
           onWorkOffline: onWorkOffline,
           onOnlyOnline: onOnlyOnline,
           onSaveAs: onSaveAs,
+          onOpenExternally: onOpenExternally,
           offlineAvailability: availability,
           offlinePolicy: policy ?? OfflinePolicy.onlineOnly,
           offlineReadiness: readiness ?? OfflineReadiness.idle,

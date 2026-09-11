@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:easy_cloud/core/errors/cloud_failure.dart';
 import 'package:easy_cloud/cloud_mail/transport/authenticated_cloud_transport.dart';
 import 'package:easy_cloud/features/auth/application/auth_repository.dart';
 import 'package:easy_cloud/features/auth/data/cloud_auth_api.dart';
@@ -20,7 +21,11 @@ void main() {
         seenCsrfTokens.add(request.headers.value('X-CSRF-Token'));
         seenCsrfQueryTokens.add(request.uri.queryParameters['token']);
         request.response.statusCode = seenAccessTokens.length == 1 ? 403 : 200;
-        request.response.write('{"status":200,"body":{}}');
+        request.response.write(
+          seenAccessTokens.length == 1
+              ? '{"status":403,"body":"token"}'
+              : '{"status":200,"body":{}}',
+        );
         await request.response.close();
       });
       final api = _RotatingAuthApi();
@@ -50,6 +55,41 @@ void main() {
       }
     },
   );
+
+  test('does not refresh a valid session for an unconfirmed 403', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final serving = server.listen((request) async {
+      request.response.statusCode = 403;
+      request.response.write('{"status":403,"body":"readonly"}');
+      await request.response.close();
+    });
+    final api = _RotatingAuthApi();
+    final auth = AuthRepository(api: api, store: MemorySessionStore());
+    await auth.login(email: 'test@mail.ru', password: 'password');
+    final transport = AuthenticatedCloudTransport(
+      authRepository: auth,
+      apiUrl: Uri.parse('http://127.0.0.1:${server.port}/api/'),
+    );
+
+    try {
+      await expectLater(
+        transport.get('file'),
+        throwsA(
+          isA<CloudFailure>().having(
+            (failure) => failure.type,
+            'type',
+            CloudFailureType.permissionDenied,
+          ),
+        ),
+      );
+      expect(api.refreshCalls, 0);
+    } finally {
+      transport.close();
+      auth.close();
+      await server.close(force: true);
+      await serving.cancel();
+    }
+  });
 }
 
 final class _RotatingAuthApi implements AuthApi {

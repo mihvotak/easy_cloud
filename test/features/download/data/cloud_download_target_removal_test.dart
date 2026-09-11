@@ -12,6 +12,7 @@ import 'package:easy_cloud/features/offline/data/sqlite_offline_file_index.dart'
 import 'package:easy_cloud/features/offline/domain/offline_target.dart';
 import 'package:easy_cloud/features/offline/domain/offline_file_record.dart';
 import 'package:easy_cloud/features/offline/domain/transient_object_record.dart';
+import 'package:easy_cloud/local/cache/cloud_cache_coordinator.dart';
 import 'package:easy_cloud/local/cache/application_cache_root.dart';
 import 'package:easy_cloud/local/cache/content_addressed_file_cache.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,15 +32,18 @@ void main() {
         databaseFactory: databaseFactoryFfi,
       );
       final auth = await _auth();
+      final coordinator = CloudCacheCoordinator();
       final repository = CloudDownloadRepository(
         api: const CloudMailApi(_NoopCloudTransport()),
         transport: _NoopDownloadTransport(),
         authRepository: auth,
         offlineFileIndex: index,
         cacheRoot: root,
+        coordinator: coordinator,
       );
       addTearDown(() async {
         await repository.close();
+        await coordinator.close();
         auth.close();
         await index.close();
         await root.delete(recursive: true);
@@ -101,15 +105,18 @@ void main() {
         databaseFactory: databaseFactoryFfi,
       );
       final auth = await _auth();
+      final coordinator = CloudCacheCoordinator();
       final repository = CloudDownloadRepository(
         api: const CloudMailApi(_NoopCloudTransport()),
         transport: _NoopDownloadTransport(),
         authRepository: auth,
         offlineFileIndex: index,
         cacheRoot: root,
+        coordinator: coordinator,
       );
       addTearDown(() async {
         await repository.close();
+        await coordinator.close();
         auth.close();
         await index.close();
         await root.delete(recursive: true);
@@ -162,15 +169,18 @@ void main() {
         databaseFactory: databaseFactoryFfi,
       );
       final auth = await _auth();
+      final coordinator = CloudCacheCoordinator();
       final repository = CloudDownloadRepository(
         api: const CloudMailApi(_NoopCloudTransport()),
         transport: _NoopDownloadTransport(),
         authRepository: auth,
         offlineFileIndex: index,
         cacheRoot: root,
+        coordinator: coordinator,
       );
       addTearDown(() async {
         await repository.close();
+        await coordinator.close();
         auth.close();
         await index.close();
         await root.delete(recursive: true);

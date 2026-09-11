@@ -31,11 +31,10 @@ final class CloudMailApi {
       if (envelope is! Map) throw const FormatException();
       final status = _asInt(envelope['status']);
       if (status != null && status >= 400) {
+        final failureType = _failureTypeForStatus(status);
         throw CloudFailure(
-          status == 404 ? CloudFailureType.notFound : CloudFailureType.service,
-          status == 404
-              ? 'Папка не найдена.'
-              : 'Mail.ru вернул ошибку $status.',
+          failureType,
+          _failureMessageForStatus(failureType, 'Папка'),
           statusCode: status,
         );
       }
@@ -97,11 +96,10 @@ final class CloudMailApi {
       if (envelope is! Map) throw const FormatException();
       final status = _asInt(envelope['status']);
       if (status != null && status >= 400) {
+        final failureType = _failureTypeForStatus(status);
         throw CloudFailure(
-          status == 404 ? CloudFailureType.notFound : CloudFailureType.service,
-          status == 404
-              ? 'Папка не найдена.'
-              : 'Mail.ru вернул ошибку $status.',
+          failureType,
+          _failureMessageForStatus(failureType, 'Папка'),
           statusCode: status,
         );
       }
@@ -140,9 +138,10 @@ final class CloudMailApi {
       if (envelope is! Map) throw const FormatException();
       final status = _asInt(envelope['status']);
       if (status != null && status >= 400) {
+        final failureType = _failureTypeForStatus(status);
         throw CloudFailure(
-          status == 404 ? CloudFailureType.notFound : CloudFailureType.service,
-          status == 404 ? 'Файл не найден.' : 'Mail.ru вернул ошибку $status.',
+          failureType,
+          _failureMessageForStatus(failureType, 'Файл'),
           statusCode: status,
         );
       }
@@ -226,5 +225,21 @@ int? _asInt(Object? value) => switch (value) {
   String text => int.tryParse(text),
   _ => null,
 };
+
+CloudFailureType _failureTypeForStatus(int status) => switch (status) {
+  401 => CloudFailureType.authRequired,
+  403 => CloudFailureType.permissionDenied,
+  404 => CloudFailureType.notFound,
+  _ => CloudFailureType.service,
+};
+
+String _failureMessageForStatus(CloudFailureType type, String objectName) =>
+    switch (type) {
+      CloudFailureType.authRequired => 'Требуется вход в Mail.ru.',
+      CloudFailureType.permissionDenied => 'Mail.ru не разрешил эту операцию.',
+      CloudFailureType.notFound =>
+        objectName == 'Файл' ? 'Файл не найден.' : 'Папка не найдена.',
+      _ => 'Mail.ru временно недоступен.',
+    };
 
 String? _opaque(Object? value) => value?.toString();

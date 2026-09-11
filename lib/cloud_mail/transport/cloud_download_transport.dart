@@ -185,11 +185,10 @@ final class CloudDownloadTransport implements DownloadTransport {
     try {
       try {
         await request.partFile.parent.create(recursive: true);
-      } on FileSystemException catch (error) {
+      } on FileSystemException {
         throw DownloadFailure(
           DownloadFailureType.disk,
           'Не удалось подготовить файл загрузки.',
-          cause: error,
         );
       }
 
@@ -688,11 +687,10 @@ final class CloudDownloadTransport implements DownloadTransport {
     if (!await partFile.exists()) return 0;
     try {
       return await partFile.length();
-    } on FileSystemException catch (error) {
+    } on FileSystemException {
       throw DownloadFailure(
         DownloadFailureType.disk,
         'Не удалось прочитать временный файл загрузки.',
-        cause: error,
       );
     }
   }
@@ -700,11 +698,10 @@ final class CloudDownloadTransport implements DownloadTransport {
   Future<void> _truncatePart(File partFile) async {
     try {
       await partFile.writeAsBytes(const [], flush: true);
-    } on FileSystemException catch (error) {
+    } on FileSystemException {
       throw DownloadFailure(
         DownloadFailureType.disk,
         'Не удалось очистить временный файл загрузки.',
-        cause: error,
       );
     }
   }
@@ -833,6 +830,7 @@ DownloadFailure _failureForStatus(int statusCode, String operation) {
 DownloadFailure _fromAuthFailure(AuthFailure failure) =>
     DownloadFailure(switch (failure.type) {
       AuthFailureType.network => DownloadFailureType.network,
+      AuthFailureType.timeout => DownloadFailureType.timeout,
       AuthFailureType.authRequired ||
       AuthFailureType.invalidCredentials => DownloadFailureType.authRequired,
       AuthFailureType.invalidResponse => DownloadFailureType.invalidResponse,
@@ -854,19 +852,17 @@ DownloadFailure _mapTransportError(Object error) => switch (error) {
     DownloadFailureType.service,
     'Ошибка протокола Mail.ru.',
   ),
-  _ => DownloadFailure(
+  _ => const DownloadFailure(
     DownloadFailureType.service,
     'Не удалось выполнить загрузку.',
-    cause: error,
   ),
 };
 
 DownloadFailure _mapStreamError(Object error) => switch (error) {
   DownloadFailure failure => failure,
-  FileSystemException() => DownloadFailure(
+  FileSystemException() => const DownloadFailure(
     DownloadFailureType.disk,
     'Не удалось записать временный файл загрузки.',
-    cause: error,
   ),
   TimeoutException() => const DownloadFailure(
     DownloadFailureType.timeout,
@@ -880,10 +876,9 @@ DownloadFailure _mapStreamError(Object error) => switch (error) {
     DownloadFailureType.service,
     'Ошибка протокола Mail.ru.',
   ),
-  _ => DownloadFailure(
+  _ => const DownloadFailure(
     DownloadFailureType.service,
     'Не удалось записать загрузку.',
-    cause: error,
   ),
 };
 

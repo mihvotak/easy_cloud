@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../download/presentation/download_controller.dart';
+import '../../editor/domain/editor_file.dart';
 import '../../offline/domain/offline_target.dart';
 import '../../offline/domain/offline_target_queue.dart';
 import '../domain/cloud_node.dart';
@@ -129,7 +130,7 @@ Future<bool?> showOfflineFolderConfirmation(
   ),
 );
 
-enum _CloudNodeAction { info, workOffline, onlyOnline, saveAs }
+enum _CloudNodeAction { info, openExternally, workOffline, onlyOnline, saveAs }
 
 final class CloudNodeTile extends StatelessWidget {
   const CloudNodeTile({
@@ -142,6 +143,7 @@ final class CloudNodeTile extends StatelessWidget {
     this.onWorkOffline,
     this.onOnlyOnline,
     this.onSaveAs,
+    this.onOpenExternally,
     this.progress,
     this.progressIndeterminate = false,
     super.key,
@@ -156,6 +158,7 @@ final class CloudNodeTile extends StatelessWidget {
   final VoidCallback? onWorkOffline;
   final VoidCallback? onOnlyOnline;
   final VoidCallback? onSaveAs;
+  final VoidCallback? onOpenExternally;
   final double? progress;
   final bool progressIndeterminate;
 
@@ -248,6 +251,8 @@ final class CloudNodeTile extends StatelessWidget {
     switch (action) {
       case _CloudNodeAction.info:
         onInfo();
+      case _CloudNodeAction.openExternally:
+        onOpenExternally?.call();
       case _CloudNodeAction.workOffline:
         onWorkOffline?.call();
       case _CloudNodeAction.onlyOnline:
@@ -297,6 +302,17 @@ final class CloudNodeTile extends StatelessWidget {
         ),
       );
       return items;
+    }
+
+    if (isEditableTextFile(node.name)) {
+      items.add(
+        _menuItem(
+          _CloudNodeAction.openExternally,
+          icon: Icons.open_in_new_rounded,
+          label: 'Открыть вовне',
+          enabled: onOpenExternally != null,
+        ),
+      );
     }
 
     switch (presentation.policy) {
@@ -726,7 +742,10 @@ IconData _fileIcon(String name) {
     'xml' ||
     'yaml' ||
     'yml' ||
-    'csv' => Icons.description_rounded,
+    'csv' ||
+    'log' ||
+    'ini' ||
+    'conf' => Icons.description_rounded,
     _ => Icons.insert_drive_file_rounded,
   };
 }

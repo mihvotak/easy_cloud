@@ -11,8 +11,10 @@ import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
 import 'package:easy_cloud/features/download/application/download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download_handle.dart';
+import 'package:easy_cloud/features/editor/application/editor_save_repository.dart';
 import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
+import 'package:easy_cloud/local/cache/cloud_cache_coordinator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -28,6 +30,8 @@ void main() {
         browserRepository: _EmptyBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: _NoopDownloadRepository(),
+        cacheCoordinator: CloudCacheCoordinator(),
+        editorSaveRepository: _NoopEditorSaveService(),
         offlineFileIndex: _NoopOfflineFileIndex(),
         offlineTargetIndex: _NoopOfflineFileIndex(),
         offlineTargetQueueStore: _NoopOfflineFileIndex(),
@@ -63,6 +67,8 @@ void main() {
         browserRepository: _EmptyBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: download,
+        cacheCoordinator: CloudCacheCoordinator(),
+        editorSaveRepository: _NoopEditorSaveService(),
         offlineFileIndex: _NoopOfflineFileIndex(),
         offlineTargetIndex: _NoopOfflineFileIndex(),
         offlineTargetQueueStore: _NoopOfflineFileIndex(),
@@ -85,6 +91,8 @@ void main() {
         browserRepository: _EmptyBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: download,
+        cacheCoordinator: CloudCacheCoordinator(),
+        editorSaveRepository: _NoopEditorSaveService(),
         offlineFileIndex: _NoopOfflineFileIndex(),
         offlineTargetIndex: _NoopOfflineFileIndex(),
         offlineTargetQueueStore: _NoopOfflineFileIndex(),
@@ -108,6 +116,8 @@ void main() {
         browserRepository: _TreeBrowserRepository(),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: _NoopDownloadRepository(),
+        cacheCoordinator: CloudCacheCoordinator(),
+        editorSaveRepository: _NoopEditorSaveService(),
         offlineFileIndex: _NoopOfflineFileIndex(),
         offlineTargetIndex: _NoopOfflineFileIndex(),
         offlineTargetQueueStore: _NoopOfflineFileIndex(),
@@ -152,6 +162,8 @@ void main() {
         browserRepository: _EmptyBrowserRepository(events),
         searchRepository: _EmptySearchRepository(),
         downloadRepository: download,
+        cacheCoordinator: CloudCacheCoordinator(),
+        editorSaveRepository: _NoopEditorSaveService(),
         offlineFileIndex: index,
         offlineTargetIndex: index,
         offlineTargetQueueStore: index,
@@ -175,6 +187,33 @@ void main() {
       'offline',
     ]);
   });
+}
+
+final class _NoopEditorSaveService implements EditorSaveService {
+  @override
+  Future<EditorConflictCheckResult> checkConflict(
+    EditorSaveBaseline baseline, {
+    EditorSaveCancellation? cancellation,
+  }) async => EditorConflictCheckResult.conflict(null);
+
+  @override
+  Future<EditorSaveResult> save(
+    EditorSaveBaseline baseline,
+    List<int> bytes, {
+    EditorSaveChoice choice = EditorSaveChoice.unchanged,
+    EditorSaveCancellation? cancellation,
+    void Function(EditorSaveProgress progress)? onProgress,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<EditorSaveResult> saveRequest(
+    EditorSaveRequest request, {
+    EditorSaveCancellation? cancellation,
+    void Function(EditorSaveProgress progress)? onProgress,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> close() async {}
 }
 
 CloudSession _session(DateTime expiresAt) => CloudSession(

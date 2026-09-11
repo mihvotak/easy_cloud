@@ -12,12 +12,11 @@ enum DownloadFailureType {
 }
 
 class DownloadFailure implements Exception {
-  const DownloadFailure(this.type, this.message, {this.statusCode, this.cause});
+  const DownloadFailure(this.type, this.message, {this.statusCode});
 
   final DownloadFailureType type;
   final String message;
   final int? statusCode;
-  final Object? cause;
 
   bool get isCancelled => type == DownloadFailureType.cancelled;
 
@@ -44,8 +43,7 @@ final class DownloadIntegrityFailure extends DownloadFailure {
     this.actualHash,
     this.expectedSize,
     this.actualSize,
-    Object? cause,
-  }) : super(DownloadFailureType.integrity, message, cause: cause);
+  }) : super(DownloadFailureType.integrity, message);
 
   final String? expectedHash;
   final String? actualHash;

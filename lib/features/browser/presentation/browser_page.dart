@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../../auth/presentation/auth_controller.dart';
 import '../../download/presentation/download_controller.dart';
+import '../../editor/application/editor_save_repository.dart';
+import '../../editor/presentation/editor_page.dart';
 import '../../offline/application/offline_file_index.dart';
 import '../../offline/application/offline_target_queue_controller.dart';
 import '../../offline/presentation/offline_availability_controller.dart';
@@ -24,6 +26,7 @@ final class BrowserPage extends StatefulWidget {
     required this.searchRepository,
     required this.downloadController,
     required this.openFileController,
+    this.editorSaveService,
     required this.offlineFileIndex,
     required this.authController,
     this.offlineTargetIndex,
@@ -37,6 +40,7 @@ final class BrowserPage extends StatefulWidget {
   final SearchRepository searchRepository;
   final DownloadController downloadController;
   final OpenFileController openFileController;
+  final EditorSaveService? editorSaveService;
   final OfflineFileIndex offlineFileIndex;
   final AuthController authController;
   final OfflineTargetIndex? offlineTargetIndex;
@@ -310,6 +314,9 @@ final class _BrowserPageState extends State<BrowserPage> {
                 ? null
                 : () => _makeOnlyOnline(node),
             onSaveAs: node.isFolder ? null : () => _saveAs(node),
+            onOpenExternally: node.isFolder || !isEditableTextFile(node.name)
+                ? null
+                : () => _openExternally(node),
             offlinePolicy: _offlinePolicyFor(node),
             offlineReadiness: _offlineReadinessFor(node),
             progress: hasOpenProgress
@@ -358,6 +365,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           searchRepository: widget.searchRepository,
           downloadController: widget.downloadController,
           openFileController: widget.openFileController,
+          editorSaveService: widget.editorSaveService,
           offlineFileIndex: widget.offlineFileIndex,
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,
@@ -377,6 +385,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           browserRepository: widget.repository,
           downloadController: widget.downloadController,
           openFileController: widget.openFileController,
+          editorSaveService: widget.editorSaveService,
           offlineFileIndex: widget.offlineFileIndex,
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,
@@ -406,6 +415,14 @@ final class _BrowserPageState extends State<BrowserPage> {
       );
 
   void _openFile(CloudNode node) {
+    if (isEditableTextFile(node.name) && widget.editorSaveService != null) {
+      unawaited(_openInEditor(node));
+      return;
+    }
+    _openExternally(node);
+  }
+
+  void _openExternally(CloudNode node) {
     unawaited(
       widget.openFileController
           .open(node)
@@ -418,6 +435,70 @@ final class _BrowserPageState extends State<BrowserPage> {
             },
           ),
     );
+  }
+
+  Future<void> _openInEditor(CloudNode node) async {
+    final account = widget.authController.session?.email.trim().toLowerCase();
+    try {
+      final prepared = await widget.openFileController.prepareForEditor(node);
+      if (!mounted || prepared == null) return;
+      final currentAccount = widget.authController.session?.email
+          .trim()
+          .toLowerCase();
+      if (widget.authController.status != AuthStatus.signedIn ||
+          account == null ||
+          currentAccount != account) {
+        return;
+      }
+      await Navigator.of(context).push<EditorSaveResult>(
+        MaterialPageRoute<EditorSaveResult>(
+          builder: (context) => EditorPage(
+            preparedFile: prepared,
+            editorSaveService: widget.editorSaveService!,
+            authController: widget.authController,
+            onSaved: _refreshAfterEditorSave,
+          ),
+        ),
+      );
+    } on EditorPreparationFailure catch (failure) {
+      if (!failure.isQuiet) _showEditorPreparationFailure(failure);
+    } catch (_) {
+      _showEditorPreparationFailure(
+        const EditorPreparationFailure(
+          EditorPreparationFailureType.service,
+          'Не удалось подготовить файл для встроенного редактора.',
+        ),
+      );
+    }
+  }
+
+  Future<void> _refreshAfterEditorSave(EditorSaveResult _) async {
+    if (!mounted) return;
+    await _controller.refresh();
+    if (mounted) await _reloadAvailability();
+  }
+
+  void _showEditorPreparationFailure(EditorPreparationFailure failure) {
+    if (!mounted) return;
+    final message = switch (failure.type) {
+      EditorPreparationFailureType.oversize =>
+        'Текстовый файл превышает лимит 10 МиБ.',
+      EditorPreparationFailureType.malformedUtf8 =>
+        'Файл содержит некорректный UTF-8.',
+      EditorPreparationFailureType.integrity =>
+        'Проверка содержимого файла не пройдена.',
+      EditorPreparationFailureType.invalidResponse =>
+        'Mail.ru вернул неполные метаданные файла.',
+      EditorPreparationFailureType.notFound => 'Удалённый файл недоступен.',
+      EditorPreparationFailureType.disk => 'Не удалось прочитать файл.',
+      EditorPreparationFailureType.service =>
+        'Не удалось подготовить файл для встроенного редактора.',
+      EditorPreparationFailureType.cancelled => '',
+    };
+    if (message.isEmpty) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _showOpenFailure() {

@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../cloud_mail/probe/cloud_hash.dart';
 import '../../browser/domain/cloud_node.dart';
 import '../../download/application/download_repository.dart';
 import '../../download/domain/download.dart';
+import '../../editor/domain/editor_file.dart';
+import '../../editor/domain/editor_save.dart';
 import '../domain/open_file_failure.dart';
 import 'file_opener.dart';
 
@@ -64,7 +68,17 @@ final class OpenFileController extends ChangeNotifier {
 
   /// Starts a new foreground open, cancelling and invalidating any previous
   /// operation first. Stale and cancelled operations complete silently.
-  Future<void> open(CloudNode node) => _runForeground(node, saveAs: false);
+  Future<void> open(CloudNode node) async {
+    await _runForeground(node, action: _ForegroundAction.open);
+  }
+
+  /// Downloads through the same foreground [DownloadRepository.startOpen]
+  /// path as an external open, then strictly decodes the verified CAS object
+  /// inside the application. It never invokes a platform opener/exporter and
+  /// never creates a durable offline marker.
+  Future<PreparedEditorFile?> prepareForEditor(CloudNode node) async =>
+      await _runForeground(node, action: _ForegroundAction.prepareForEditor)
+          as PreparedEditorFile?;
 
   /// Prepares a verified transient CAS object and exports it through the
   /// platform picker. This intentionally uses [DownloadRepository.startOpen]
@@ -74,10 +88,15 @@ final class OpenFileController extends ChangeNotifier {
   /// action starts while Android owns the picker, the native result may still
   /// arrive because Android cannot cancel an already launched picker; the
   /// attempt check below discards that stale result and its UI effects.
-  Future<void> saveAs(CloudNode node) => _runForeground(node, saveAs: true);
+  Future<void> saveAs(CloudNode node) async {
+    await _runForeground(node, action: _ForegroundAction.saveAs);
+  }
 
-  Future<void> _runForeground(CloudNode node, {required bool saveAs}) async {
-    if (_disposed || node.isFolder) return;
+  Future<Object?> _runForeground(
+    CloudNode node, {
+    required _ForegroundAction action,
+  }) async {
+    if (_disposed || node.isFolder) return null;
 
     _invalidateCurrent(notify: true);
     final attempt = _attempt;
@@ -96,7 +115,7 @@ final class OpenFileController extends ChangeNotifier {
       handle = startedHandle;
       if (!_isCurrent(attempt)) {
         startedHandle.cancel();
-        return;
+        return null;
       }
       _handle = startedHandle;
       subscription = startedHandle.progress.listen((value) {
@@ -120,22 +139,36 @@ final class OpenFileController extends ChangeNotifier {
       _progressSubscription = subscription;
 
       final file = await startedHandle.result;
-      if (!_isCurrent(attempt)) return;
+      if (!_isCurrent(attempt)) return null;
 
-      // The repository contract returns a verified CAS object. Keep the path
-      // opaque to Flutter UI; Android validates the exact object shape again.
-      if (saveAs) {
-        final selected = await _fileExporter.saveFileAs(
-          file.absolute.path,
-          node.name,
-        );
-        if (!_isCurrent(attempt) || !selected) return;
-      } else {
-        await _fileOpener.openFile(file.absolute.path, node.name);
+      switch (action) {
+        case _ForegroundAction.open:
+          // The repository contract returns a verified CAS object. Keep the
+          // path opaque to Flutter UI; Android validates the exact object
+          // shape again.
+          await _fileOpener.openFile(file.absolute.path, node.name);
+          if (!_isCurrent(attempt)) return null;
+        case _ForegroundAction.saveAs:
+          final selected = await _fileExporter.saveFileAs(
+            file.absolute.path,
+            node.name,
+          );
+          if (!_isCurrent(attempt) || !selected) return null;
+        case _ForegroundAction.prepareForEditor:
+          return await _prepareEditorFile(node, file, startedHandle, attempt);
       }
+      return null;
     } catch (error, stackTrace) {
-      if (!_isCurrent(attempt) || _isCancellation(error)) return;
+      if (!_isCurrent(attempt) || _isCancellation(error)) return null;
 
+      if (action == _ForegroundAction.prepareForEditor) {
+        final failure = _preparationFailure(error);
+        _clearCurrent(attempt);
+        if (!_isCurrent(attempt)) return null;
+        Error.throwWithStackTrace(failure, stackTrace);
+      }
+
+      final saveAs = action == _ForegroundAction.saveAs;
       final failure = error is OpenFileFailure
           ? error.type == OpenFileFailureType.download && saveAs
                 ? const OpenFileFailure(OpenFileFailureType.saveAs)
@@ -146,7 +179,7 @@ final class OpenFileController extends ChangeNotifier {
                   : OpenFileFailureType.download,
             );
       _clearCurrent(attempt);
-      if (!_isCurrent(attempt)) return;
+      if (!_isCurrent(attempt)) return null;
       Error.throwWithStackTrace(failure, stackTrace);
     } finally {
       // A stale operation must not clean up resources belonging to the newer
@@ -161,6 +194,178 @@ final class OpenFileController extends ChangeNotifier {
       }
       await subscription?.cancel();
     }
+  }
+
+  Future<PreparedEditorFile> _prepareEditorFile(
+    CloudNode requestedNode,
+    File file,
+    DownloadHandle handle,
+    int attempt,
+  ) async {
+    _throwIfStale(attempt);
+    late final int actualLength;
+    try {
+      // Check the filesystem before allocating a byte buffer. The bounded
+      // stream below also protects against a file growing after this check.
+      actualLength = await file.length();
+    } on FileSystemException {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.disk,
+        'Не удалось прочитать подготовленный файл.',
+      );
+    }
+    _throwIfStale(attempt);
+    if (actualLength > editorMaxBytes) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.oversize,
+        'Текстовый файл превышает лимит 10 МиБ.',
+      );
+    }
+
+    final bytes = await _readBounded(file, attempt);
+    _throwIfStale(attempt);
+    if (bytes.length > editorMaxBytes) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.oversize,
+        'Текстовый файл превышает лимит 10 МиБ.',
+      );
+    }
+    final finalLength = await file.length();
+    _throwIfStale(attempt);
+    if (finalLength > editorMaxBytes || finalLength != bytes.length) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.integrity,
+        'Проверка содержимого файла не пройдена.',
+      );
+    }
+
+    final content = decodeEditorUtf8(bytes);
+    final verifiedNode = handle is VerifiedDownloadHandle
+        ? handle.verifiedNode
+        : null;
+    final remoteNode = verifiedNode ?? requestedNode;
+    _verifyRemoteNode(requestedNode, remoteNode, bytes);
+    final actualHash = calculateCloudHash(bytes);
+    final expectedHash = remoteNode.hash!.trim().toUpperCase();
+    if (actualHash != expectedHash) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.integrity,
+        'Проверка содержимого файла не пройдена.',
+      );
+    }
+
+    final baseline = EditorSaveBaseline(
+      path: remoteNode.path,
+      hash: actualHash,
+      size: bytes.length,
+      modifiedAt: remoteNode.modifiedAt,
+      revision: remoteNode.revision,
+      globalRevision: remoteNode.globalRevision,
+    );
+    return PreparedEditorFile(
+      file: file,
+      remoteNode: remoteNode,
+      text: content.text,
+      hasUtf8Bom: content.hasUtf8Bom,
+      baseline: baseline,
+      bytes: bytes,
+    );
+  }
+
+  Future<List<int>> _readBounded(File file, int attempt) async {
+    final bytes = <int>[];
+    try {
+      await for (final chunk in file.openRead(0, editorMaxBytes + 1)) {
+        _throwIfStale(attempt);
+        final remaining = editorMaxBytes + 1 - bytes.length;
+        if (remaining <= 0) break;
+        if (chunk.length <= remaining) {
+          bytes.addAll(chunk);
+        } else {
+          bytes.addAll(chunk.take(remaining));
+          break;
+        }
+      }
+    } on FileSystemException {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.disk,
+        'Не удалось прочитать подготовленный файл.',
+      );
+    }
+    return List<int>.unmodifiable(bytes);
+  }
+
+  void _verifyRemoteNode(
+    CloudNode requestedNode,
+    CloudNode remoteNode,
+    List<int> bytes,
+  ) {
+    if (remoteNode.type != CloudNodeType.file || remoteNode.hash == null) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.invalidResponse,
+        'Mail.ru вернул неполные метаданные файла.',
+      );
+    }
+    try {
+      final requestedPath = normalizeEditorPath(requestedNode.path);
+      final remotePath = normalizeEditorPath(remoteNode.path);
+      if (requestedPath != remotePath ||
+          !RegExp(r'^[0-9A-Fa-f]{40}$').hasMatch(remoteNode.hash!) ||
+          (remoteNode.size != null && remoteNode.size != bytes.length)) {
+        throw const EditorPreparationFailure(
+          EditorPreparationFailureType.integrity,
+          'Проверка содержимого файла не пройдена.',
+        );
+      }
+    } on EditorPreparationFailure {
+      rethrow;
+    } on ArgumentError {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.invalidResponse,
+        'Путь удалённого файла недействителен.',
+      );
+    }
+  }
+
+  void _throwIfStale(int attempt) {
+    if (!_isCurrent(attempt)) {
+      throw const EditorPreparationFailure(
+        EditorPreparationFailureType.cancelled,
+        'Операция подготовки отменена.',
+      );
+    }
+  }
+
+  EditorPreparationFailure _preparationFailure(Object error) {
+    if (error is EditorPreparationFailure) return error;
+    if (error is DownloadFailure) {
+      return EditorPreparationFailure(
+        switch (error.type) {
+          DownloadFailureType.cancelled =>
+            EditorPreparationFailureType.cancelled,
+          DownloadFailureType.notFound => EditorPreparationFailureType.notFound,
+          DownloadFailureType.integrity =>
+            EditorPreparationFailureType.integrity,
+          DownloadFailureType.invalidResponse =>
+            EditorPreparationFailureType.invalidResponse,
+          DownloadFailureType.disk => EditorPreparationFailureType.disk,
+          _ => EditorPreparationFailureType.service,
+        },
+        switch (error.type) {
+          DownloadFailureType.notFound => 'Удалённый файл недоступен.',
+          DownloadFailureType.integrity =>
+            'Проверка содержимого файла не пройдена.',
+          DownloadFailureType.invalidResponse =>
+            'Mail.ru вернул неполные метаданные файла.',
+          DownloadFailureType.disk => 'Не удалось прочитать файл.',
+          _ => 'Не удалось подготовить файл для встроенного редактора.',
+        },
+      );
+    }
+    return const EditorPreparationFailure(
+      EditorPreparationFailureType.service,
+      'Не удалось подготовить файл для встроенного редактора.',
+    );
   }
 
   /// Cancels the foreground open without changing persistent download state.
@@ -179,7 +384,8 @@ final class OpenFileController extends ChangeNotifier {
 
   bool _isCancellation(Object error) =>
       error is DownloadCancelled ||
-      error is DownloadFailure && error.isCancelled;
+      error is DownloadFailure && error.isCancelled ||
+      error is EditorPreparationFailure && error.isCancelled;
 
   void _invalidateCurrent({required bool notify}) {
     _attempt++;
@@ -209,6 +415,8 @@ final class OpenFileController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+enum _ForegroundAction { open, saveAs, prepareForEditor }
 
 /// Keeps the two-argument controller construction useful for open-only test
 /// compositions. Production and save-as compositions always inject the real

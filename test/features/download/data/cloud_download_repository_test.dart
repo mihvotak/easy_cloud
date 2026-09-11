@@ -14,6 +14,7 @@ import 'package:easy_cloud/features/download/application/download_repository.dar
 import 'package:easy_cloud/features/download/data/cloud_download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download.dart';
 import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
+import 'package:easy_cloud/local/cache/cloud_cache_coordinator.dart';
 import 'package:easy_cloud/local/cache/content_addressed_file_cache.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -1119,6 +1120,8 @@ void main() {
       ]);
       final downloadTransport = _DownloadTransport(payload);
       final factoryEmails = <String>[];
+      final coordinator = CloudCacheCoordinator();
+      addTearDown(coordinator.close);
       final repository = CloudDownloadRepository(
         api: CloudMailApi(statTransport),
         transport: downloadTransport,
@@ -1128,6 +1131,7 @@ void main() {
           factoryEmails.add(email);
           return ContentAddressedFileCache(root: root, email: email);
         },
+        coordinator: coordinator,
       );
       addTearDown(repository.close);
 
@@ -2446,13 +2450,18 @@ CloudDownloadRepository _repository({
   required _StatTransport statTransport,
   required _DownloadTransport downloadTransport,
   _MemoryOfflineFileIndex? index,
-}) => CloudDownloadRepository(
-  api: CloudMailApi(statTransport),
-  transport: downloadTransport,
-  authRepository: auth,
-  offlineFileIndex: index ?? _MemoryOfflineFileIndex(),
-  cacheRoot: root,
-);
+}) {
+  final coordinator = CloudCacheCoordinator();
+  addTearDown(coordinator.close);
+  return CloudDownloadRepository(
+    api: CloudMailApi(statTransport),
+    transport: downloadTransport,
+    authRepository: auth,
+    offlineFileIndex: index ?? _MemoryOfflineFileIndex(),
+    cacheRoot: root,
+    coordinator: coordinator,
+  );
+}
 
 final class _MemoryOfflineFileIndex
     implements OfflineTargetStorage, TransientObjectIndex {

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../features/auth/application/auth_repository.dart';
 import '../features/auth/presentation/auth_gate.dart';
+import '../local/cache/cloud_cache_coordinator.dart';
 import '../features/browser/application/browser_repository.dart';
 import '../features/download/application/download_repository.dart';
+import '../features/editor/application/editor_save_repository.dart';
 import '../features/offline/application/offline_file_index.dart';
 import '../features/open/application/file_opener.dart';
 import '../features/open/data/method_channel_file_opener.dart';
@@ -15,6 +17,8 @@ final class EasyCloudApp extends StatelessWidget {
     required this.browserRepository,
     required this.searchRepository,
     required this.downloadRepository,
+    required this.cacheCoordinator,
+    required this.editorSaveRepository,
     required this.offlineFileIndex,
     required this.offlineTargetIndex,
     required this.offlineTargetQueueStore,
@@ -27,6 +31,8 @@ final class EasyCloudApp extends StatelessWidget {
   final BrowserRepository browserRepository;
   final SearchRepository searchRepository;
   final DownloadRepository downloadRepository;
+  final CloudCacheCoordinator cacheCoordinator;
+  final EditorSaveService editorSaveRepository;
   final OfflineFileIndex offlineFileIndex;
   final OfflineTargetIndex offlineTargetIndex;
   final OfflineTargetQueueStore offlineTargetQueueStore;
@@ -94,6 +100,8 @@ final class EasyCloudApp extends StatelessWidget {
         browserRepository: browserRepository,
         searchRepository: searchRepository,
         downloadRepository: downloadRepository,
+        cacheCoordinator: cacheCoordinator,
+        editorSaveRepository: editorSaveRepository,
         offlineFileIndex: offlineFileIndex,
         offlineTargetIndex: offlineTargetIndex,
         offlineTargetQueueStore: offlineTargetQueueStore,

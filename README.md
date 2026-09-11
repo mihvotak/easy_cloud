@@ -20,6 +20,9 @@ Implemented:
   network is unavailable;
 - persistent offline-ready markers and contextual file actions in browser and
   search results;
+- an internal UTF-8 text editor for supported text files, preserving BOMs and
+  line endings, enforcing a 10 MiB encoded-size limit, and resolving cloud
+  save conflicts without silently overwriting newer remote content;
 - sanitized protocol probe and live contract documentation under `docs/`.
 
 The normal Mail.ru account password is not supported. Create an application

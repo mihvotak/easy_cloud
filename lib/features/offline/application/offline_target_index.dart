@@ -146,6 +146,27 @@ abstract interface class OfflineTargetIndex {
   );
 }
 
+/// Optional transactional capability used by conflict-safe editor saves.
+///
+/// The operation updates only an already-ready membership whose target
+/// incarnation, path, and expected old hash still match.  It never creates a
+/// target or membership and returns false for a vanished or newer ownership
+/// row.
+abstract interface class ConditionalOfflineTargetOwnership {
+  Future<bool> updateTargetFileIfMatches(
+    String email, {
+    required String targetPath,
+    required String targetIncarnation,
+    required String filePath,
+    required String expectedHash,
+    required String hash,
+    required int size,
+    DateTime? modifiedAt,
+    String? revision,
+    String? globalRevision,
+  });
+}
+
 /// Transactional storage required by [OfflineTargetQueueController].
 ///
 /// The queue never falls back to a sequence of independent writes: target

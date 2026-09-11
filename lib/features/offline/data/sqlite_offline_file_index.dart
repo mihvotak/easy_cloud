@@ -22,7 +22,9 @@ final class SqliteOfflineFileIndex
         OfflineTargetStorage,
         OfflineTargetQueueStore,
         CloudMetadataCache,
-        TransientObjectIndex {
+        TransientObjectIndex,
+        ConditionalOfflineFileOwnership,
+        ConditionalOfflineTargetOwnership {
   SqliteOfflineFileIndex({
     CacheRootProvider? rootProvider,
     sqflite.DatabaseFactory? databaseFactory,
@@ -92,6 +94,52 @@ final class SqliteOfflineFileIndex
             "AND UPPER(hash) NOT GLOB '*[^0-9A-F]*'",
         whereArgs: [accountKey, normalizeCloudHash(record.hash)],
       );
+    });
+  }
+
+  @override
+  Future<bool> updateDirectIfMatches(
+    String email, {
+    required String path,
+    required String expectedHash,
+    required OfflineFileRecord replacement,
+  }) async {
+    _ensureOpen();
+    final accountKey = accountCacheKey(email);
+    final normalizedPath = normalizeOfflineRemotePath(path);
+    final normalizedExpectedHash = normalizeCloudHash(expectedHash);
+    if (replacement.path != normalizedPath) {
+      throw ArgumentError.value(
+        replacement.path,
+        'replacement.path',
+        'Replacement path must match the conditional path.',
+      );
+    }
+    final database = await _openDatabaseIfNeeded();
+    _ensureOpen();
+    return database.transaction((transaction) async {
+      final rows = await transaction.query(
+        tableName,
+        where: 'account_key = ? AND path = ?',
+        whereArgs: [accountKey, normalizedPath],
+        limit: 2,
+      );
+      if (rows.length > 1) {
+        throw StateError('Offline file primary key is malformed.');
+      }
+      if (rows.isEmpty) return false;
+      final current = _fromRow(rows.single);
+      if (current.hash != normalizedExpectedHash) return false;
+
+      final updated = await transaction.update(
+        tableName,
+        _toRow(accountKey, replacement),
+        where:
+            'account_key = ? AND path = ? AND length(hash) = 40 AND '
+            'UPPER(hash) = ? AND UPPER(hash) NOT GLOB \'*[^0-9A-F]*\'',
+        whereArgs: [accountKey, normalizedPath, normalizedExpectedHash],
+      );
+      return updated == 1;
     });
   }
 
@@ -1152,6 +1200,115 @@ final class SqliteOfflineFileIndex
           normalizedTargetPath,
           normalizedIncarnation,
           normalizedFilePath,
+        ],
+      );
+      return updated == 1;
+    });
+  }
+
+  @override
+  Future<bool> updateTargetFileIfMatches(
+    String email, {
+    required String targetPath,
+    required String targetIncarnation,
+    required String filePath,
+    required String expectedHash,
+    required String hash,
+    required int size,
+    DateTime? modifiedAt,
+    String? revision,
+    String? globalRevision,
+  }) async {
+    _ensureOpen();
+    if (size < 0) {
+      throw ArgumentError.value(size, 'size', 'Size must be nonnegative.');
+    }
+    final accountKey = accountCacheKey(email);
+    final normalizedTargetPath = normalizeOfflineRemotePath(targetPath);
+    final normalizedFilePath = normalizeOfflineRemotePath(filePath);
+    final normalizedIncarnation = normalizeOfflineTargetIncarnation(
+      targetIncarnation,
+    );
+    final normalizedExpectedHash = normalizeCloudHash(expectedHash);
+    final normalizedHash = normalizeCloudHash(hash);
+    if (!_pathCovers(normalizedTargetPath, normalizedFilePath) ||
+        normalizedFilePath == '/') {
+      throw ArgumentError.value(filePath, 'filePath');
+    }
+    final database = await _openDatabaseIfNeeded();
+    _ensureOpen();
+
+    return database.transaction((transaction) async {
+      final targetRows = await transaction.query(
+        targetsTableName,
+        where: 'account_key = ? AND target_path = ? AND target_incarnation = ?',
+        whereArgs: [accountKey, normalizedTargetPath, normalizedIncarnation],
+        limit: 2,
+      );
+      if (targetRows.length > 1) {
+        throw StateError('Offline target primary key is malformed.');
+      }
+      if (targetRows.isEmpty) return false;
+      final target = _targetFromRow(
+        targetRows.single,
+        expectedAccountKey: accountKey,
+        expectedTargetPath: normalizedTargetPath,
+      );
+      if (target.state == OfflineTargetState.removing) return false;
+
+      final rows = await transaction.query(
+        targetFilesTableName,
+        where:
+            'account_key = ? AND target_path = ? AND target_incarnation = ? '
+            'AND file_path = ?',
+        whereArgs: [
+          accountKey,
+          normalizedTargetPath,
+          normalizedIncarnation,
+          normalizedFilePath,
+        ],
+        limit: 2,
+      );
+      if (rows.length > 1) {
+        throw StateError('Offline target file primary key is malformed.');
+      }
+      if (rows.isEmpty) return false;
+      final current = _targetFileFromRow(
+        rows.single,
+        expectedAccountKey: accountKey,
+        expectedTargetPath: normalizedTargetPath,
+      );
+      if (current.targetIncarnation != normalizedIncarnation ||
+          current.readiness != OfflineReadiness.ready ||
+          !current.hasValidHash ||
+          current.hash != normalizedExpectedHash) {
+        return false;
+      }
+
+      final updated = await transaction.update(
+        targetFilesTableName,
+        {
+          'hash': normalizedHash,
+          'size': size,
+          'modified_at': modifiedAt?.toUtc().microsecondsSinceEpoch,
+          'revision': revision,
+          'global_revision': globalRevision,
+          'readiness': _readinessValue(OfflineReadiness.ready),
+          'bytes_done': size,
+          'error_code': null,
+          'updated_at': DateTime.now().toUtc().microsecondsSinceEpoch,
+        },
+        where:
+            'account_key = ? AND target_path = ? AND target_incarnation = ? '
+            'AND file_path = ? AND readiness = ? AND length(hash) = 40 AND '
+            'UPPER(hash) = ? AND UPPER(hash) NOT GLOB \'*[^0-9A-F]*\'',
+        whereArgs: [
+          accountKey,
+          normalizedTargetPath,
+          normalizedIncarnation,
+          normalizedFilePath,
+          _readinessValue(OfflineReadiness.ready),
+          normalizedExpectedHash,
         ],
       );
       return updated == 1;
