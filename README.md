@@ -16,6 +16,10 @@ Implemented:
 - resumable streaming downloads with progress, cancellation, integrity checks,
   and an account-isolated content-addressed offline cache;
 - persistent account-isolated offline metadata and an offline-files screen;
+- hybrid folder metadata snapshots with familiar cached navigation when the
+  network is unavailable;
+- persistent offline-ready markers and contextual file actions in browser and
+  search results;
 - sanitized protocol probe and live contract documentation under `docs/`.
 
 The normal Mail.ru account password is not supported. Create an application

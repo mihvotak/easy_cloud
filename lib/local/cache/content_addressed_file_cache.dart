@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
 
 import 'application_cache_root.dart';
 
@@ -10,6 +11,17 @@ final class CacheObjectPaths {
 
   final File objectFile;
   final File partFile;
+}
+
+/// A final CAS object discovered at its canonical account-scoped path.
+///
+/// Enumeration is deliberately metadata-only. Callers that need to trust the
+/// contents must validate the object through the normal cache lookup path.
+final class CacheObjectCandidate {
+  const CacheObjectCandidate({required this.file, required this.hash});
+
+  final File file;
+  final String hash;
 }
 
 final class ContentAddressedFileCache {
@@ -70,6 +82,86 @@ final class ContentAddressedFileCache {
     return object;
   }
 
+  /// Enumerates only canonical final object files for this account.
+  ///
+  /// The walk is intentionally limited to `objects/<AA>/<BB>/<HASH>` and
+  /// never follows a symlink. Unknown entries, temporary parts and malformed
+  /// names are ignored. The result is sorted by hash because directory
+  /// iteration order is not stable across platforms.
+  Future<List<CacheObjectCandidate>> enumerateFinalObjects() async {
+    final account = await accountDirectory();
+    if (!await _isDirectoryWithoutFollowingLinks(account.path)) {
+      return const <CacheObjectCandidate>[];
+    }
+
+    final objects = Directory(_join(account.path, 'objects'));
+    if (!await _isDirectoryWithoutFollowingLinks(objects.path)) {
+      return const <CacheObjectCandidate>[];
+    }
+
+    final candidates = <CacheObjectCandidate>[];
+    final firstLevel = await objects.list(followLinks: false).toList();
+    firstLevel.sort(_compareEntities);
+    for (final first in firstLevel) {
+      final firstName = p.basename(first.path);
+      if (!_uppercaseHexPair.hasMatch(firstName) ||
+          !await _isDirectoryWithoutFollowingLinks(first.path)) {
+        continue;
+      }
+
+      final secondDirectory = Directory(first.path);
+      final secondLevel = await secondDirectory
+          .list(followLinks: false)
+          .toList();
+      secondLevel.sort(_compareEntities);
+      for (final second in secondLevel) {
+        final secondName = p.basename(second.path);
+        if (!_uppercaseHexPair.hasMatch(secondName) ||
+            !await _isDirectoryWithoutFollowingLinks(second.path)) {
+          continue;
+        }
+
+        final objectDirectory = Directory(second.path);
+        final entries = await objectDirectory.list(followLinks: false).toList();
+        entries.sort(_compareEntities);
+        for (final entry in entries) {
+          final name = p.basename(entry.path);
+          if (!_uppercaseCloudHash.hasMatch(name) ||
+              !name.startsWith(firstName) ||
+              name.substring(2, 4) != secondName ||
+              await FileSystemEntity.type(entry.path, followLinks: false) !=
+                  FileSystemEntityType.file) {
+            continue;
+          }
+          candidates.add(
+            CacheObjectCandidate(file: File(entry.path), hash: name),
+          );
+        }
+      }
+    }
+
+    candidates.sort((left, right) {
+      final byHash = left.hash.compareTo(right.hash);
+      return byHash == 0 ? left.file.path.compareTo(right.file.path) : byHash;
+    });
+    return List.unmodifiable(candidates);
+  }
+
+  /// Revalidates a discovered candidate without opening or hashing its
+  /// contents. This is used immediately before ownership queries and again
+  /// before deletion to close the enumeration/race window.
+  Future<bool> isCanonicalFinalObject(CacheObjectCandidate candidate) async {
+    final normalizedHash = normalizeCloudHash(candidate.hash);
+    if (candidate.hash != normalizedHash) return false;
+    final expected = await objectFile(normalizedHash);
+    if (candidate.file.path != expected.path) return false;
+    final type = await FileSystemEntity.type(
+      candidate.file.path,
+      followLinks: false,
+    );
+    return type == FileSystemEntityType.file;
+  }
+
   /// Moves a caller-verified part into the content-addressed object path.
   ///
   /// The cache deliberately does not calculate or verify the content hash.
@@ -111,6 +203,16 @@ final class ContentAddressedFileCache {
     if (await object.exists()) await object.delete();
   }
 }
+
+final _uppercaseHexPair = RegExp(r'^[0-9A-F]{2}$');
+final _uppercaseCloudHash = RegExp(r'^[0-9A-F]{40}$');
+
+Future<bool> _isDirectoryWithoutFollowingLinks(String path) async =>
+    await FileSystemEntity.type(path, followLinks: false) ==
+    FileSystemEntityType.directory;
+
+int _compareEntities(FileSystemEntity left, FileSystemEntity right) =>
+    left.path.compareTo(right.path);
 
 String accountCacheKey(String email) =>
     sha256.convert(utf8.encode(email.trim().toLowerCase())).toString();

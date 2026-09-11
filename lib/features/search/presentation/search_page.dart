@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide SearchController;
 
 import '../../auth/presentation/auth_controller.dart';
@@ -7,6 +9,10 @@ import '../../browser/presentation/browser_page.dart';
 import '../../browser/presentation/cloud_node_widgets.dart';
 import '../../download/presentation/download_controller.dart';
 import '../../offline/application/offline_file_index.dart';
+import '../../offline/application/offline_target_queue_controller.dart';
+import '../../offline/presentation/offline_availability_controller.dart';
+import '../../open/application/open_file_controller.dart';
+import '../../open/domain/open_file_failure.dart';
 import '../application/search_repository.dart';
 import 'search_controller.dart';
 
@@ -16,7 +22,10 @@ final class SearchPage extends StatefulWidget {
     required this.browserRepository,
     required this.authController,
     required this.downloadController,
+    required this.openFileController,
     required this.offlineFileIndex,
+    this.offlineTargetIndex,
+    this.offlineTargetQueueController,
     this.path = '/',
     super.key,
   });
@@ -25,7 +34,10 @@ final class SearchPage extends StatefulWidget {
   final BrowserRepository browserRepository;
   final AuthController authController;
   final DownloadController downloadController;
+  final OpenFileController openFileController;
   final OfflineFileIndex offlineFileIndex;
+  final OfflineTargetIndex? offlineTargetIndex;
+  final OfflineTargetQueueController? offlineTargetQueueController;
   final String path;
 
   @override
@@ -35,6 +47,10 @@ final class SearchPage extends StatefulWidget {
 final class _SearchPageState extends State<SearchPage> {
   late final SearchController _controller;
   late final TextEditingController _textController;
+  OfflineAvailabilityController? _availabilityController;
+  String? _availabilityEmail;
+  Set<String> _availabilityPaths = <String>{};
+  final _offlineOperations = <String>{};
 
   @override
   void initState() {
@@ -43,12 +59,101 @@ final class _SearchPageState extends State<SearchPage> {
       repository: widget.repository,
       path: widget.path,
     );
+    _controller.addListener(_onVisibleResultsChanged);
     _textController = TextEditingController();
+    widget.authController.addListener(_onAuthChanged);
+    widget.downloadController.addListener(_onDownloadChanged);
+    widget.openFileController.addListener(_onOpenFileChanged);
+    widget.offlineTargetQueueController?.addListener(_onQueueChanged);
+    _syncAvailabilityWithSession();
+  }
+
+  void _onAuthChanged() {
+    if (!mounted) return;
+    _syncAvailabilityWithSession();
+    if (widget.authController.status == AuthStatus.signedIn) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).popUntil((route) => route.isFirst);
+    });
+  }
+
+  void _onVisibleResultsChanged() => _loadAvailabilityForVisibleResults();
+
+  void _onAvailabilityChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onDownloadChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onOpenFileChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onQueueChanged() {
+    if (!mounted) return;
+    _loadAvailabilityForVisibleResults(force: true);
+  }
+
+  void _syncAvailabilityWithSession() {
+    final email = widget.authController.session?.email;
+    if (email == _availabilityEmail &&
+        (_availabilityController != null || email == null)) {
+      return;
+    }
+
+    _disposeAvailabilityController();
+    _availabilityEmail = email;
+    _availabilityPaths = <String>{};
+    if (email == null) return;
+
+    final controller = OfflineAvailabilityController(
+      index: widget.offlineFileIndex,
+      email: email,
+      targetIndex: widget.offlineTargetIndex,
+    );
+    _availabilityController = controller;
+    controller.addListener(_onAvailabilityChanged);
+    _loadAvailabilityForVisibleResults();
+  }
+
+  void _loadAvailabilityForVisibleResults({bool force = false}) {
+    final availabilityController = _availabilityController;
+    if (availabilityController == null) return;
+
+    final includeFolders =
+        widget.offlineTargetQueueController != null ||
+        widget.offlineTargetIndex != null;
+    final paths = widget.authController.session == null
+        ? <String>{}
+        : _controller.results
+              .where((node) => includeFolders || !node.isFolder)
+              .map((node) => node.path)
+              .toSet();
+    if (!force && _samePaths(_availabilityPaths, paths)) return;
+    _availabilityPaths = paths;
+    if (paths.isEmpty) return;
+    unawaited(availabilityController.load(paths));
+  }
+
+  void _disposeAvailabilityController() {
+    final controller = _availabilityController;
+    if (controller == null) return;
+    controller.removeListener(_onAvailabilityChanged);
+    controller.dispose();
+    _availabilityController = null;
   }
 
   @override
   void dispose() {
+    widget.authController.removeListener(_onAuthChanged);
+    widget.downloadController.removeListener(_onDownloadChanged);
+    widget.openFileController.removeListener(_onOpenFileChanged);
+    widget.offlineTargetQueueController?.removeListener(_onQueueChanged);
+    _controller.removeListener(_onVisibleResultsChanged);
     _textController.dispose();
+    _disposeAvailabilityController();
     _controller.dispose();
     super.dispose();
   }
@@ -145,12 +250,47 @@ final class _SearchPageState extends State<SearchPage> {
       itemCount: _controller.results.length,
       itemBuilder: (context, index) {
         final node = _controller.results[index];
+        final downloadState = widget.downloadController.stateFor(node.path);
+        final downloadActive = _isDownloadActive(downloadState);
+        final openProgress = widget.openFileController.progressFor(node.path);
+        final hasOpenProgress = openProgress != null;
         return CloudNodeTile(
           node: node,
-          onTap: () => node.isFolder ? _openFolder(node) : _showFile(node),
+          onTap: () => node.isFolder ? _openFolder(node) : _openFile(node),
           onInfo: () => node.isFolder
               ? showCloudNodeMetadata(context, node)
               : _showFile(node),
+          onWorkOffline: node.isFolder
+              ? widget.offlineTargetQueueController == null ||
+                        !_folderAvailabilityKnown(node) ||
+                        _offlineOperations.contains(node.path)
+                    ? null
+                    : _offlinePolicyFor(node) == OfflinePolicy.onlineOnly
+                    ? () => _workOffline(node)
+                    : null
+              : () => widget.downloadController.start(node),
+          onOnlyOnline: node.isFolder
+              ? widget.offlineTargetQueueController == null ||
+                        !_folderAvailabilityKnown(node) ||
+                        _offlineOperations.contains(node.path)
+                    ? null
+                    : _isDirectTarget(node)
+                    ? () => _makeOnlyOnline(node)
+                    : null
+              : _offlineOperations.contains(node.path)
+              ? null
+              : () => _makeOnlyOnline(node),
+          onSaveAs: node.isFolder ? null : () => _saveAs(node),
+          offlinePolicy: _offlinePolicyFor(node),
+          offlineReadiness: _offlineReadinessFor(node),
+          progress: hasOpenProgress
+              ? openProgress.fraction
+              : downloadActive
+              ? downloadState?.fraction
+              : null,
+          progressIndeterminate: hasOpenProgress
+              ? openProgress.fraction == null
+              : downloadActive && downloadState?.fraction == null,
         );
       },
     );
@@ -164,6 +304,19 @@ final class _SearchPageState extends State<SearchPage> {
   void _openFolder(CloudNode folder) =>
       _openBrowser(path: folder.path, title: folder.name);
 
+  void _openFile(CloudNode node) {
+    unawaited(
+      widget.openFileController
+          .open(node)
+          .then<void>(
+            (_) {},
+            onError: (Object _, StackTrace _) {
+              _showOpenFailure();
+            },
+          ),
+    );
+  }
+
   Future<void> _showFile(CloudNode file) => showCloudNodeMetadata(
     context,
     file,
@@ -176,6 +329,107 @@ final class _SearchPageState extends State<SearchPage> {
     },
   );
 
+  void _showOpenFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text(OpenFileFailure.safeMessage)),
+      );
+  }
+
+  void _saveAs(CloudNode node) {
+    unawaited(
+      widget.openFileController
+          .saveAs(node)
+          .then<void>(
+            (_) {},
+            onError: (Object _, StackTrace _) {
+              _showSaveAsFailure();
+            },
+          ),
+    );
+  }
+
+  void _showSaveAsFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text(OpenFileFailure.safeSaveAsMessage)),
+      );
+  }
+
+  void _makeOnlyOnline(CloudNode node) {
+    unawaited(node.isFolder ? _removeTarget(node) : _removeOffline(node));
+  }
+
+  void _workOffline(CloudNode folder) {
+    unawaited(_enqueueOffline(folder));
+  }
+
+  Future<void> _enqueueOffline(CloudNode folder) async {
+    if (!_offlineOperations.add(folder.path)) return;
+    if (mounted) setState(() {});
+    try {
+      final estimate = estimateOfflineFolder(folder);
+      if (estimate.requiresConfirmation) {
+        if (!mounted) return;
+        final confirmed = await showOfflineFolderConfirmation(
+          context,
+          folder,
+          estimate,
+        );
+        if (confirmed != true) return;
+      }
+      final queue = widget.offlineTargetQueueController;
+      if (queue == null) throw StateError('Offline queue is unavailable.');
+      await queue.enqueue(folder, estimate.queueEstimate);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Не удалось сделать папку офлайн-доступной.'),
+        ),
+      );
+    } finally {
+      _offlineOperations.remove(folder.path);
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _removeTarget(CloudNode folder) async {
+    if (!_offlineOperations.add(folder.path)) return;
+    if (mounted) setState(() {});
+    try {
+      final queue = widget.offlineTargetQueueController;
+      if (queue == null) throw StateError('Offline queue is unavailable.');
+      await queue.remove(folder.path);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось отключить офлайн-доступ.')),
+      );
+    } finally {
+      _offlineOperations.remove(folder.path);
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _removeOffline(CloudNode node) async {
+    try {
+      await widget.downloadController.removeOffline(node);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось отключить офлайн-доступ.')),
+      );
+    }
+  }
+
   void _openBrowser({required String path, required String title}) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -183,7 +437,10 @@ final class _SearchPageState extends State<SearchPage> {
           repository: widget.browserRepository,
           searchRepository: widget.repository,
           downloadController: widget.downloadController,
+          openFileController: widget.openFileController,
           offlineFileIndex: widget.offlineFileIndex,
+          offlineTargetIndex: widget.offlineTargetIndex,
+          offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
           path: path,
           title: title,
@@ -191,7 +448,64 @@ final class _SearchPageState extends State<SearchPage> {
       ),
     );
   }
+
+  Future<void> _reloadAvailability() async {
+    final controller = _availabilityController;
+    if (controller == null) return;
+    await controller.load(_availabilityPaths);
+  }
+
+  OfflinePolicy _offlinePolicyFor(CloudNode node) {
+    final state = _availabilityController?.stateFor(node.path);
+    if (!node.isFolder &&
+        (state == null ||
+            state.source == OfflineAvailabilitySource.onlineOnly) &&
+        _directDownloadReady(node)) {
+      return OfflinePolicy.direct;
+    }
+    return switch (state?.source) {
+      OfflineAvailabilitySource.direct ||
+      OfflineAvailabilitySource.directTarget => OfflinePolicy.direct,
+      OfflineAvailabilitySource.inherited => OfflinePolicy.inherited,
+      OfflineAvailabilitySource.onlineOnly || null => OfflinePolicy.onlineOnly,
+    };
+  }
+
+  OfflineReadiness _offlineReadinessFor(CloudNode node) {
+    final state = _availabilityController?.stateFor(node.path);
+    if (!node.isFolder && _directDownloadReady(node)) {
+      return OfflineReadiness.ready;
+    }
+    if (state != null) return state.readiness;
+    return OfflineReadiness.idle;
+  }
+
+  bool _directDownloadReady(CloudNode node) =>
+      widget.downloadController.stateFor(node.path)?.status ==
+      DownloadItemStatus.ready;
+
+  bool _isDirectTarget(CloudNode node) =>
+      _availabilityController?.stateFor(node.path)?.source ==
+      OfflineAvailabilitySource.directTarget;
+
+  bool _folderAvailabilityKnown(CloudNode node) {
+    final controller = _availabilityController;
+    return node.isFolder &&
+        controller != null &&
+        !controller.isLoading &&
+        controller.stateFor(node.path) != null;
+  }
 }
+
+bool _isDownloadActive(DownloadItemState? state) {
+  final status = state?.status;
+  return status == DownloadItemStatus.resolving ||
+      status == DownloadItemStatus.receiving ||
+      status == DownloadItemStatus.verifying;
+}
+
+bool _samePaths(Set<String> left, Set<String> right) =>
+    left.length == right.length && left.containsAll(right);
 
 final class _SearchMessage extends StatelessWidget {
   const _SearchMessage({

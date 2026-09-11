@@ -17,6 +17,62 @@ final class ProbeException implements Exception {
   String toString() => message;
 }
 
+enum FileConflict {
+  strict,
+  rewrite,
+  rename;
+
+  String get wireValue => name;
+}
+
+enum FileAddError {
+  exists,
+  contentNotFound,
+  overQuota,
+  readOnly,
+  unauthorized,
+  invalidRequest,
+  apiFailure,
+  httpFailure,
+  invalidResponse,
+}
+
+final class CloudFileIdentity {
+  const CloudFileIdentity({required this.hash, required this.size});
+
+  final String hash;
+  final int size;
+}
+
+final class UploadShardResult {
+  const UploadShardResult({required this.hash, required this.size});
+
+  final String hash;
+  final int? size;
+}
+
+final class FileAddResult {
+  const FileAddResult._({
+    required this.statusCode,
+    required this.returnedPath,
+    required this.error,
+  });
+
+  const FileAddResult.success({required int statusCode, String? returnedPath})
+    : this._(statusCode: statusCode, returnedPath: returnedPath, error: null);
+
+  const FileAddResult.failure({
+    required int statusCode,
+    required FileAddError error,
+  }) : this._(statusCode: statusCode, returnedPath: null, error: error);
+
+  final int statusCode;
+  final String? returnedPath;
+  final FileAddError? error;
+
+  bool get succeeded => error == null;
+}
+
 final class OAuthSession {
   OAuthSession({
     required this.accessToken,
@@ -221,6 +277,9 @@ final class CloudProbeClient {
   Future<ProbeResponse> stat(OAuthSession session, String path) =>
       _apiRequest(session, 'GET', 'file', query: {'home': _cloudPath(path)});
 
+  Future<RemoteMetadata> readMetadata(OAuthSession session, String path) =>
+      _metadata(session, path);
+
   Future<ProbeResponse> search(
     OAuthSession session,
     String query, {
@@ -345,10 +404,9 @@ final class CloudProbeClient {
     }
   }
 
-  Future<void> upload(
+  Future<CloudFileIdentity> uploadContent(
     OAuthSession session,
     File source,
-    String remotePath,
   ) async {
     if (!await source.exists()) {
       throw ProbeException('Local file does not exist: ${source.path}');
@@ -376,16 +434,23 @@ final class CloudProbeClient {
     _logResponse(response);
     _requireSuccess(response, 'upload content');
 
-    final hashMatch = RegExp(
-      r'^[0-9a-fA-F]{40}',
-    ).firstMatch(response.text.trim());
-    if (hashMatch == null) {
-      throw ProbeException('Upload shard did not return a 40-character hash.');
-    }
-    final serverHash = hashMatch.group(0)!.toUpperCase();
-    if (serverHash != localHash) {
+    final uploadResult = parseUploadShardResponse(
+      response.text,
+      expectedSize: size,
+    );
+    if (uploadResult.hash != localHash) {
       throw ProbeException('Upload hash differs from the local cloud hash.');
     }
+
+    return CloudFileIdentity(hash: uploadResult.hash, size: size);
+  }
+
+  Future<void> upload(
+    OAuthSession session,
+    File source,
+    String remotePath,
+  ) async {
+    final identity = await uploadContent(session, source);
 
     await _apiRequest(
       session,
@@ -395,18 +460,217 @@ final class CloudProbeClient {
         'api': '2',
         'conflict': 'strict',
         'home': _cloudPath(remotePath),
-        'hash': serverHash,
-        'size': '$size',
+        'hash': identity.hash,
+        'size': '${identity.size}',
       },
     );
     final metadata = await _metadata(session, remotePath);
-    if (metadata.size != null && metadata.size != size) {
+    if (metadata.size != null && metadata.size != identity.size) {
       throw ProbeException('Remote size does not match after registration.');
     }
-    if (metadata.hash != null && metadata.hash!.toUpperCase() != serverHash) {
+    if (metadata.hash != null &&
+        metadata.hash!.toUpperCase() != identity.hash) {
       throw ProbeException('Remote hash does not match after registration.');
     }
-    stdout.writeln('upload verified: $size bytes, hash $serverHash');
+    stdout.writeln(
+      'upload verified: ${identity.size} bytes, hash ${identity.hash}',
+    );
+  }
+
+  Future<FileAddResult> registerByIdentity(
+    OAuthSession session,
+    CloudFileIdentity identity,
+    String remotePath, {
+    required FileConflict conflict,
+  }) async {
+    _validateIdentity(identity);
+    final path = _validatedFilePath(remotePath);
+    final response = await _apiRequestRaw(
+      session,
+      'POST',
+      'file/add',
+      form: {
+        'api': '2',
+        'conflict': conflict.wireValue,
+        'home': path,
+        'hash': identity.hash.toUpperCase(),
+        'size': '${identity.size}',
+      },
+    );
+    return _parseFileAddResult(response, conflict: conflict);
+  }
+
+  FileAddResult _parseFileAddResult(
+    ProbeResponse response, {
+    required FileConflict conflict,
+  }) {
+    final error = _classifyFileAddError(response);
+    if (error != null) {
+      return FileAddResult.failure(
+        statusCode: response.statusCode,
+        error: error,
+      );
+    }
+
+    final envelope = _tryJsonObject(response);
+    final returnedPath = envelope == null
+        ? null
+        : _extractReturnedPath(envelope['body']);
+    if (conflict == FileConflict.rename && returnedPath == null) {
+      return FileAddResult.failure(
+        statusCode: response.statusCode,
+        error: FileAddError.invalidResponse,
+      );
+    }
+    return FileAddResult.success(
+      statusCode: response.statusCode,
+      returnedPath: returnedPath,
+    );
+  }
+
+  FileAddError? _classifyFileAddError(ProbeResponse response) {
+    final envelope = _tryJsonObject(response);
+    final apiStatus = envelope == null ? null : _asInt(envelope['status']);
+    final code = envelope == null
+        ? _plainFileAddErrorCode(response)
+        : _fileAddErrorCode(envelope);
+    final mappedCode = _mapFileAddError(code);
+    if (mappedCode != null) return mappedCode;
+
+    if (response.statusCode == HttpStatus.unauthorized ||
+        response.statusCode == HttpStatus.forbidden ||
+        apiStatus == HttpStatus.unauthorized ||
+        apiStatus == HttpStatus.forbidden) {
+      return FileAddError.unauthorized;
+    }
+    if (apiStatus != null && apiStatus >= 400) {
+      return FileAddError.apiFailure;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return FileAddError.httpFailure;
+    }
+    if (envelope != null &&
+        (envelope['error'] != null || _hasNestedFileAddError(envelope))) {
+      return FileAddError.apiFailure;
+    }
+    return null;
+  }
+
+  String? _plainFileAddErrorCode(ProbeResponse response) {
+    try {
+      final text = response.text.trim();
+      return RegExp(r'^[a-zA-Z_/]+$').hasMatch(text) ? text : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  String? _fileAddErrorCode(Map<String, Object?> envelope) {
+    final topLevelError = envelope['error'];
+    if (topLevelError is String) return topLevelError;
+
+    final body = envelope['body'];
+    if (body is String) return body;
+    if (body is! Map) return null;
+
+    final directError = body['error'];
+    if (directError is String) return directError;
+    for (final key in const ['home', 'weblink', 'invite_email']) {
+      final value = body[key];
+      if (value is Map && value['error'] is String) {
+        return value['error'] as String;
+      }
+    }
+    return null;
+  }
+
+  bool _hasNestedFileAddError(Map<String, Object?> envelope) {
+    final body = envelope['body'];
+    if (body is! Map) return false;
+    if (body['error'] is String) return true;
+    return const ['home', 'weblink', 'invite_email'].any((key) {
+      final value = body[key];
+      return value is Map && value['error'] is String;
+    });
+  }
+
+  FileAddError? _mapFileAddError(String? value) {
+    final normalized = value?.trim().toLowerCase();
+    return switch (normalized) {
+      'exists' => FileAddError.exists,
+      'not_exists' || 'content_not_found' => FileAddError.contentNotFound,
+      'overquota' || 'quota_exceeded' => FileAddError.overQuota,
+      'readonly' || 'read_only' => FileAddError.readOnly,
+      'required' || 'invalid' => FileAddError.invalidRequest,
+      'token' ||
+      'user' ||
+      'not/authorized' ||
+      'not_authorized' => FileAddError.unauthorized,
+      null => null,
+      _ => null,
+    };
+  }
+
+  Map<String, Object?>? _tryJsonObject(ProbeResponse response) {
+    try {
+      final value = response.json;
+      if (value is Map) return value.cast<String, Object?>();
+    } on FormatException {
+      // The response shape is already logged without exposing its body.
+    }
+    return null;
+  }
+
+  String? _extractReturnedPath(Object? body) {
+    Object? candidate = body;
+    if (body is Map) {
+      candidate = body['home'] ?? body['path'];
+    }
+    if (candidate is! String) return null;
+    return _safeFilePath(candidate);
+  }
+
+  String? _safeFilePath(String value) {
+    final path = value.trim();
+    if (path.length < 2 ||
+        path.length > 4096 ||
+        !path.startsWith('/') ||
+        path.startsWith('//') ||
+        path.endsWith('/') ||
+        path.contains('\\')) {
+      return null;
+    }
+    if (path.codeUnits.any((unit) => unit < 0x20 || unit == 0x7f)) {
+      return null;
+    }
+    final segments = path.substring(1).split('/');
+    if (segments.any(
+      (segment) => segment.isEmpty || segment == '.' || segment == '..',
+    )) {
+      return null;
+    }
+    return '/${segments.join('/')}';
+  }
+
+  String _validatedFilePath(String value) {
+    final path = _safeFilePath(_cloudPath(value));
+    if (path == null) {
+      throw ProbeException(
+        'Remote file path must be a non-root absolute path.',
+      );
+    }
+    return path;
+  }
+
+  void _validateIdentity(CloudFileIdentity identity) {
+    if (identity.size < 0) {
+      throw ProbeException('File identity size cannot be negative.');
+    }
+    if (!RegExp(r'^[0-9a-fA-F]{40}$').hasMatch(identity.hash)) {
+      throw ProbeException(
+        'File identity hash must be a 40-character hex value.',
+      );
+    }
   }
 
   Future<RemoteMetadata> _metadata(OAuthSession session, String path) async {
@@ -416,13 +680,35 @@ final class CloudProbeClient {
     if (body is! Map) {
       throw ProbeException('Stat response body is not an object.');
     }
-    return RemoteMetadata(
-      size: _asInt(body['size']),
-      hash: body['hash'] as String?,
-    );
+    final hash = body['hash'];
+    if (hash != null && hash is! String) {
+      throw ProbeException('Stat response hash has an invalid shape.');
+    }
+    return RemoteMetadata(size: _asInt(body['size']), hash: hash as String?);
   }
 
   Future<ProbeResponse> _apiRequest(
+    OAuthSession session,
+    String method,
+    String endpoint, {
+    Map<String, String> query = const {},
+    Map<String, String>? form,
+    bool includeCsrf = true,
+  }) async {
+    final response = await _apiRequestRaw(
+      session,
+      method,
+      endpoint,
+      query: query,
+      form: form,
+      includeCsrf: includeCsrf,
+    );
+    _requireSuccess(response, endpoint);
+    _requireApiEnvelopeSuccess(response, endpoint);
+    return response;
+  }
+
+  Future<ProbeResponse> _apiRequestRaw(
     OAuthSession session,
     String method,
     String endpoint, {
@@ -441,8 +727,6 @@ final class CloudProbeClient {
       headers: {if (includeCsrf && csrf != null) 'X-CSRF-Token': csrf},
       form: form,
     );
-    _requireSuccess(response, endpoint);
-    _requireApiEnvelopeSuccess(response, endpoint);
     return response;
   }
 
@@ -588,6 +872,43 @@ String _cloudPath(String value) {
 }
 
 String _originOnly(Uri uri) => '${uri.scheme}://${uri.authority}';
+
+UploadShardResult parseUploadShardResponse(
+  String response, {
+  required int expectedSize,
+}) {
+  if (expectedSize < 0) {
+    throw ProbeException('Expected upload size cannot be negative.');
+  }
+
+  final match = RegExp(
+    r'^([0-9a-fA-F]{40})(?:;([0-9]+))?$',
+  ).firstMatch(response.trim());
+  if (match == null) {
+    throw ProbeException(
+      'Upload shard response must be HASH or HASH;DECIMAL_SIZE.',
+    );
+  }
+
+  final reportedSizeText = match.group(2);
+  int? reportedSize;
+  if (reportedSizeText != null) {
+    reportedSize = int.tryParse(reportedSizeText);
+    if (reportedSize == null) {
+      throw ProbeException('Upload shard returned an invalid decimal size.');
+    }
+    if (reportedSize != expectedSize) {
+      throw ProbeException(
+        'Upload shard size differs from the local content size.',
+      );
+    }
+  }
+
+  return UploadShardResult(
+    hash: match.group(1)!.toUpperCase(),
+    size: reportedSize,
+  );
+}
 
 int? _asInt(Object? value) => switch (value) {
   int number => number,

@@ -259,25 +259,28 @@ void main() {
     expect(controller.stateFor(node.path)?.file, same(file));
   });
 
-  test('dispose cancels active downloads and closes the repository', () async {
-    final handle = _FakeDownloadHandle();
-    final repository = _FakeDownloadRepository([handle]);
-    final controller = DownloadController(repository);
-    addTearDown(() async {
+  test(
+    'dispose cancels active downloads but leaves the shared repository open',
+    () async {
+      final handle = _FakeDownloadHandle();
+      final repository = _FakeDownloadRepository([handle]);
+      final controller = DownloadController(repository);
+      addTearDown(() async {
+        controller.dispose();
+        await repository.closeHandles();
+      });
+      final node = _node('/docs/report.pdf');
+
+      controller.start(node);
       controller.dispose();
-      await repository.closeHandles();
-    });
-    final node = _node('/docs/report.pdf');
 
-    controller.start(node);
-    controller.dispose();
+      expect(handle.cancelCalls, 1);
+      expect(repository.closeCalls, 0);
 
-    expect(handle.cancelCalls, 1);
-    expect(repository.closeCalls, 1);
-
-    handle.complete(File('disposed-report.pdf'));
-    await _settle();
-  });
+      handle.complete(File('disposed-report.pdf'));
+      await _settle();
+    },
+  );
 
   test('reset cancels active downloads and ignores stale completion', () async {
     final handle = _FakeDownloadHandle();
@@ -318,6 +321,123 @@ void main() {
 
     expect(controller.stateFor(node.path), isNull);
   });
+
+  test(
+    'removes ready state and notifies only after a successful unpin',
+    () async {
+      final handle = _FakeDownloadHandle();
+      final repository = _FakeDownloadRepository([handle]);
+      final controller = DownloadController(repository);
+      addTearDown(() async {
+        controller.dispose();
+        await repository.closeHandles();
+      });
+      final node = _node('/docs/report.pdf', size: 10);
+      controller.start(node);
+      handle.complete(File('report.pdf'));
+      await _settle();
+      var notifications = 0;
+      controller.addListener(() => notifications++);
+
+      await controller.removeOffline(node);
+
+      expect(repository.removeCalls, 1);
+      expect(controller.stateFor(node.path), isNull);
+      expect(notifications, 1);
+    },
+  );
+
+  test(
+    'keeps ready state and hides failure details when unpin fails',
+    () async {
+      final handle = _FakeDownloadHandle();
+      final repository = _FakeDownloadRepository([handle]);
+      final controller = DownloadController(repository);
+      addTearDown(() async {
+        controller.dispose();
+        await repository.closeHandles();
+      });
+      final node = _node('/docs/report.pdf', size: 10);
+      controller.start(node);
+      handle.complete(File('report.pdf'));
+      await _settle();
+      repository.removeFailure = StateError('private filesystem path');
+      var notifications = 0;
+      controller.addListener(() => notifications++);
+
+      await expectLater(
+        controller.removeOffline(node),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(controller.stateFor(node.path)?.status, DownloadItemStatus.ready);
+      expect(notifications, 0);
+    },
+  );
+
+  test(
+    'cancels an active same-path download and waits before clearing state',
+    () async {
+      final handle = _FakeDownloadHandle();
+      final repository = _FakeDownloadRepository([handle]);
+      final controller = DownloadController(repository);
+      addTearDown(() async {
+        controller.dispose();
+        await repository.closeHandles();
+      });
+      final node = _node('/docs/report.pdf', size: 10);
+      controller.start(node);
+      handle.emit(
+        const DownloadProgress(
+          phase: DownloadPhase.receiving,
+          bytes: 4,
+          total: 10,
+          resumed: false,
+        ),
+      );
+      final unpin = Completer<void>();
+      repository.removeResult = unpin.future;
+      var notifications = 0;
+      controller.addListener(() => notifications++);
+
+      final removal = controller.removeOffline(node);
+      await _settle();
+      expect(handle.cancelCalls, 1);
+      expect(
+        controller.stateFor(node.path)?.status,
+        DownloadItemStatus.receiving,
+      );
+      expect(notifications, 0);
+
+      unpin.complete();
+      await removal;
+
+      expect(controller.stateFor(node.path), isNull);
+      expect(notifications, 1);
+    },
+  );
+
+  test('disposed controller makes a pending unpin harmless', () async {
+    final handle = _FakeDownloadHandle();
+    final repository = _FakeDownloadRepository([handle]);
+    final controller = DownloadController(repository);
+    final node = _node('/docs/report.pdf');
+    controller.start(node);
+    handle.complete(File('report.pdf'));
+    await _settle();
+    final unpin = Completer<void>();
+    repository.removeResult = unpin.future;
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+
+    final removal = controller.removeOffline(node);
+    controller.dispose();
+    unpin.complete();
+    await removal;
+
+    expect(notifications, 0);
+    await repository.closeHandles();
+  });
 }
 
 CloudNode _node(String path, {int? size}) => CloudNode(
@@ -339,6 +459,9 @@ final class _FakeDownloadRepository implements DownloadRepository {
   final List<_FakeDownloadHandle> _queued;
   final started = <_FakeDownloadHandle>[];
   int closeCalls = 0;
+  int removeCalls = 0;
+  Future<void>? removeResult;
+  Object? removeFailure;
 
   @override
   DownloadHandle start(CloudNode node) {
@@ -350,7 +473,40 @@ final class _FakeDownloadRepository implements DownloadRepository {
   }
 
   @override
-  void close() => closeCalls++;
+  DownloadHandle startOpen(CloudNode node) => start(node);
+
+  @override
+  DownloadHandle startTarget(
+    CloudNode node, {
+    required String targetPath,
+    required String expectedEmail,
+    required String targetIncarnation,
+  }) => start(node);
+
+  @override
+  Future<void> removeOffline(CloudNode node) async {
+    removeCalls++;
+    final failure = removeFailure;
+    if (failure != null) throw failure;
+    await removeResult;
+  }
+
+  @override
+  Future<void> removeTarget(
+    String targetPath, {
+    required String expectedEmail,
+    required String targetIncarnation,
+  }) async {
+    final failure = removeFailure;
+    if (failure != null) throw failure;
+    await removeResult;
+  }
+
+  @override
+  Future<void> reconcileAccountCache({required String expectedEmail}) async {}
+
+  @override
+  Future<void> close() async => closeCalls++;
 
   Future<void> closeHandles() async {
     for (final handle in started) {

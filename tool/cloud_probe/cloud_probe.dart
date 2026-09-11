@@ -1,4 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+
+import 'package:easy_cloud/cloud_mail/probe/cloud_hash.dart';
 
 import 'probe_client.dart';
 import 'probe_options.dart';
@@ -23,6 +27,26 @@ Future<void> main(List<String> arguments) async {
     exitCode = 2;
     return;
   }
+  if (options.command == 'conflict-roundtrip') {
+    if (!options.hasFlag('confirm-write')) {
+      stderr.writeln(
+        'conflict-roundtrip requires the exact --confirm-write flag.',
+      );
+      exitCode = 2;
+      return;
+    }
+    if (options.positionals.isNotEmpty ||
+        options.value('remote-file') != null ||
+        options.hasFlag('remote-file') ||
+        options.hasFlag('conflict')) {
+      stderr.writeln(
+        'conflict-roundtrip generates its own paths and does not accept '
+        'positional paths or conflict overrides.',
+      );
+      exitCode = 2;
+      return;
+    }
+  }
 
   final client = CloudProbeClient(options);
   try {
@@ -46,6 +70,10 @@ Future<void> main(List<String> arguments) async {
     }
     if (options.command == 'roundtrip') {
       await _runRoundtrip(client, session, options);
+      return;
+    }
+    if (options.command == 'conflict-roundtrip') {
+      await _runConflictRoundtrip(client, session);
       return;
     }
 
@@ -144,6 +172,7 @@ const _commands = <String>{
   'login',
   'suite',
   'roundtrip',
+  'conflict-roundtrip',
   'refresh',
   'csrf',
   'dispatcher',
@@ -249,6 +278,422 @@ Future<void> _runRoundtrip(
   }
 }
 
+Future<void> _runConflictRoundtrip(
+  CloudProbeClient client,
+  OAuthSession session,
+) async {
+  final startedAt = DateTime.now().toUtc();
+  final createdPaths = <String>{};
+  final fixtureDirectory = await Directory.systemTemp.createTemp(
+    'easy-cloud-conflict-probe-',
+  );
+  Object? operationError;
+  StackTrace? operationStack;
+  var cleanupFailed = false;
+
+  try {
+    stdout.writeln('\n=== conflict-roundtrip ===');
+    stdout.writeln('capability probe date: ${startedAt.toIso8601String()}');
+
+    await client.acquireCsrf(session);
+    stdout.writeln('csrf succeeded');
+
+    final nonce = _conflictProbeNonce();
+    final originalPath = '/easy-cloud-conflict-probe-$nonce.txt';
+    final seedPath = '/easy-cloud-conflict-probe-$nonce-seed.txt';
+    final fixtureA = File(
+      '${fixtureDirectory.path}${Platform.pathSeparator}a.txt',
+    );
+    final fixtureB = File(
+      '${fixtureDirectory.path}${Platform.pathSeparator}b.txt',
+    );
+    await fixtureA.writeAsString('easy-cloud conflict fixture A $nonce\n');
+    await fixtureB.writeAsString(
+      'easy-cloud conflict fixture B $nonce has distinct content\n',
+    );
+    final expectedA = await _localIdentity(fixtureA);
+    final expectedB = await _localIdentity(fixtureB);
+    if (expectedA.hash == expectedB.hash || expectedA.size == expectedB.size) {
+      throw ProbeException('Conflict fixtures did not remain distinct.');
+    }
+    stdout.writeln(
+      'fixtures ready: A=${expectedA.size} bytes/${expectedA.hash}, '
+      'B=${expectedB.size} bytes/${expectedB.hash}',
+    );
+
+    stdout.writeln('\n=== strict: create original with A ===');
+    final uploadedA = await client.uploadContent(session, fixtureA);
+    _requireIdentityEquals(uploadedA, expectedA, 'fixture A upload');
+    final addA = await client.registerByIdentity(
+      session,
+      uploadedA,
+      originalPath,
+      conflict: FileConflict.strict,
+    );
+    _requireFileAddSuccess(addA, 'strict registration of fixture A');
+    createdPaths.add(originalPath);
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      originalPath,
+      expectedA,
+      label: 'original after A',
+    );
+
+    stdout.writeln('\n=== seed B at a temporary path ===');
+    final uploadedB = await client.uploadContent(session, fixtureB);
+    _requireIdentityEquals(uploadedB, expectedB, 'fixture B upload');
+    final addSeed = await client.registerByIdentity(
+      session,
+      uploadedB,
+      seedPath,
+      conflict: FileConflict.strict,
+    );
+    _requireFileAddSuccess(addSeed, 'strict registration of fixture B seed');
+    createdPaths.add(seedPath);
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      seedPath,
+      expectedB,
+      label: 'temporary B seed',
+    );
+
+    stdout.writeln('\n=== strict conflict ===');
+    final strictConflict = await client.registerByIdentity(
+      session,
+      uploadedB,
+      originalPath,
+      conflict: FileConflict.strict,
+    );
+    if (strictConflict.error != FileAddError.exists) {
+      throw ProbeException(
+        'strict conflict did not reject as exists '
+        '(classification=${_fileAddClassification(strictConflict)}, '
+        'HTTP ${strictConflict.statusCode}).',
+      );
+    }
+    stdout.writeln(
+      'strict conflict rejected as exists: path=$originalPath, '
+      'HTTP ${strictConflict.statusCode}',
+    );
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      originalPath,
+      expectedA,
+      label: 'original after strict rejection',
+    );
+
+    stdout.writeln('\n=== rewrite conflict ===');
+    final rewrite = await client.registerByIdentity(
+      session,
+      uploadedB,
+      originalPath,
+      conflict: FileConflict.rewrite,
+    );
+    _requireFileAddSuccess(rewrite, 'rewrite registration of fixture B');
+    if (rewrite.returnedPath != null && rewrite.returnedPath != originalPath) {
+      throw ProbeException(
+        'rewrite returned an unexpected safe path: ${rewrite.returnedPath}',
+      );
+    }
+    stdout.writeln(
+      'rewrite succeeded: path=$originalPath, '
+      'returned=${rewrite.returnedPath ?? 'not reported'}',
+    );
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      originalPath,
+      expectedB,
+      label: 'original after rewrite',
+    );
+    await _reportRewriteHistory(client, session, originalPath, expectedB);
+
+    stdout.writeln('\n=== rename conflict ===');
+    final rename = await client.registerByIdentity(
+      session,
+      uploadedA,
+      originalPath,
+      conflict: FileConflict.rename,
+    );
+    _requireFileAddSuccess(rename, 'rename registration of fixture A');
+    final renamedPath = rename.returnedPath;
+    if (renamedPath == null) {
+      throw ProbeException(
+        'rename succeeded without a safe server-selected path.',
+      );
+    }
+    createdPaths.add(renamedPath);
+    if (renamedPath == originalPath) {
+      throw ProbeException('rename returned the original path.');
+    }
+    if (!_areAdjacentPaths(originalPath, renamedPath)) {
+      throw ProbeException(
+        'rename returned a path outside the original folder.',
+      );
+    }
+    if (renamedPath == seedPath) {
+      throw ProbeException('rename returned the temporary seed path.');
+    }
+    final renamedBasename = _basename(renamedPath);
+    final namingEvidence = renamedBasename.contains('(1)')
+        ? 'expected "(1)" marker present'
+        : RegExp(r'\(\d+\)').hasMatch(renamedBasename)
+        ? 'server numeric conflict suffix present'
+        : 'server-specific basename; no "(1)" marker required';
+    stdout.writeln('rename selected: path=$renamedPath');
+    stdout.writeln(
+      'rename basename=${jsonEncode(renamedBasename)}; evidence=$namingEvidence',
+    );
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      renamedPath,
+      expectedA,
+      label: 'renamed A output',
+    );
+    await _verifyRemoteMetadata(
+      client,
+      session,
+      originalPath,
+      expectedB,
+      label: 'original after rename',
+    );
+
+    stdout.writeln(
+      'conflict capability probe completed: date=${startedAt.toIso8601String()}',
+    );
+  } catch (error, stack) {
+    operationError = error;
+    operationStack = stack;
+  } finally {
+    try {
+      cleanupFailed = await _cleanupConflictPaths(
+        client,
+        session,
+        createdPaths,
+      );
+    } catch (error) {
+      cleanupFailed = true;
+      stderr.writeln(
+        'remote cleanup failed unexpectedly (runtime=${error.runtimeType}); '
+        'generated paths may remain.',
+      );
+    }
+    try {
+      if (await fixtureDirectory.exists()) {
+        await fixtureDirectory.delete(recursive: true);
+      }
+    } catch (error) {
+      cleanupFailed = true;
+      stderr.writeln(
+        'local fixture cleanup failed (runtime=${error.runtimeType}); '
+        'temporary content may remain.',
+      );
+    }
+  }
+
+  if (operationError != null) {
+    Error.throwWithStackTrace(
+      operationError,
+      operationStack ?? StackTrace.current,
+    );
+  }
+  if (cleanupFailed) {
+    throw ProbeException(
+      'Conflict roundtrip finished with cleanup failures; inspect the '
+      'reported generated paths.',
+    );
+  }
+}
+
+Future<CloudFileIdentity> _localIdentity(File file) async => CloudFileIdentity(
+  hash: await calculateCloudFileHash(file),
+  size: await file.length(),
+);
+
+void _requireIdentityEquals(
+  CloudFileIdentity actual,
+  CloudFileIdentity expected,
+  String label,
+) {
+  if (actual.hash != expected.hash || actual.size != expected.size) {
+    throw ProbeException('$label did not preserve the local identity.');
+  }
+}
+
+void _requireFileAddSuccess(FileAddResult result, String operation) {
+  if (!result.succeeded) {
+    throw ProbeException(
+      '$operation failed (classification=${_fileAddClassification(result)}, '
+      'HTTP ${result.statusCode}).',
+    );
+  }
+}
+
+String _fileAddClassification(FileAddResult result) =>
+    result.error?.name ?? 'success';
+
+Future<void> _verifyRemoteMetadata(
+  CloudProbeClient client,
+  OAuthSession session,
+  String path,
+  CloudFileIdentity expected, {
+  required String label,
+}) async {
+  final metadata = await client.readMetadata(session, path);
+  final actualHash = metadata.hash?.toUpperCase();
+  if (metadata.size != expected.size || actualHash != expected.hash) {
+    throw ProbeException(
+      '$label stat mismatch (expected size=${expected.size}, '
+      'hash=${expected.hash}).',
+    );
+  }
+  stdout.writeln(
+    'stat verified: $label path=$path size=${expected.size} hash=${expected.hash}',
+  );
+}
+
+Future<void> _reportRewriteHistory(
+  CloudProbeClient client,
+  OAuthSession session,
+  String path,
+  CloudFileIdentity identity,
+) async {
+  stdout.writeln('\n=== history after rewrite ===');
+  try {
+    final response = await client.history(session, path);
+    switch (_historyEvidence(response, identity)) {
+      case _HistoryEvidence.hash:
+        stdout.writeln('history: new B version visible (hash match)');
+      case _HistoryEvidence.size:
+        stdout.writeln(
+          'history: new B version visible (size-only; hash omitted)',
+        );
+      case _HistoryEvidence.notVisible:
+        stdout.writeln('history: new B version not visible');
+      case _HistoryEvidence.unknown:
+        stdout.writeln(
+          'history: new B version visibility unknown (no comparable fields)',
+        );
+    }
+  } on ProbeException {
+    stdout.writeln(
+      'history: new B version visibility unknown (unsupported/error)',
+    );
+  } on SocketException {
+    stdout.writeln(
+      'history: new B version visibility unknown (network failure)',
+    );
+  } catch (error) {
+    stdout.writeln(
+      'history: new B version visibility unknown (runtime=${error.runtimeType})',
+    );
+  }
+}
+
+enum _HistoryEvidence { hash, size, notVisible, unknown }
+
+_HistoryEvidence _historyEvidence(
+  ProbeResponse response,
+  CloudFileIdentity identity,
+) {
+  Object? decoded;
+  try {
+    decoded = response.json;
+  } on FormatException {
+    return _HistoryEvidence.unknown;
+  }
+  if (decoded is! Map) return _HistoryEvidence.unknown;
+  Object? body = decoded['body'];
+  if (body is Map) body = body['list'];
+  if (body is! List) return _HistoryEvidence.unknown;
+  if (body.isEmpty) return _HistoryEvidence.notVisible;
+
+  var comparable = false;
+  var sizeMatch = false;
+  for (final entry in body) {
+    if (entry is! Map) continue;
+    final hash = entry['hash'];
+    if (hash is String) {
+      comparable = true;
+      if (hash.toUpperCase() == identity.hash) {
+        return _HistoryEvidence.hash;
+      }
+    }
+    final size = _historyInt(entry['size']);
+    if (size != null) {
+      comparable = true;
+      if (size == identity.size) sizeMatch = true;
+    }
+  }
+  if (sizeMatch) return _HistoryEvidence.size;
+  return comparable ? _HistoryEvidence.notVisible : _HistoryEvidence.unknown;
+}
+
+int? _historyInt(Object? value) => switch (value) {
+  int number => number,
+  String text => int.tryParse(text),
+  _ => null,
+};
+
+Future<bool> _cleanupConflictPaths(
+  CloudProbeClient client,
+  OAuthSession session,
+  Set<String> paths,
+) async {
+  var failed = false;
+  for (final path in paths.toList(growable: false).reversed) {
+    stdout.writeln('cleanup: removing path=$path');
+    try {
+      await client.removeFile(session, path);
+      stdout.writeln('cleanup succeeded: path=$path');
+    } on ProbeException {
+      failed = true;
+      stderr.writeln('cleanup failed: path=$path (probe error)');
+    } on SocketException {
+      failed = true;
+      stderr.writeln('cleanup failed: path=$path (network failure)');
+    } on HandshakeException {
+      failed = true;
+      stderr.writeln('cleanup failed: path=$path (TLS failure)');
+    } on HttpException {
+      failed = true;
+      stderr.writeln('cleanup failed: path=$path (HTTP protocol failure)');
+    } catch (error) {
+      failed = true;
+      stderr.writeln(
+        'cleanup failed: path=$path (runtime=${error.runtimeType})',
+      );
+    }
+  }
+  if (failed) {
+    stderr.writeln(
+      'cleanup incomplete: generated paths may remain; credentials and tokens '
+      'were not printed.',
+    );
+  }
+  return failed;
+}
+
+String _conflictProbeNonce() {
+  final timestamp = DateTime.now().toUtc().microsecondsSinceEpoch;
+  final random = Random.secure().nextInt(0x7fffffff);
+  return '$timestamp-${random.toRadixString(16).padLeft(8, '0')}';
+}
+
+bool _areAdjacentPaths(String first, String second) =>
+    _parentPath(first) == _parentPath(second);
+
+String _parentPath(String path) {
+  final separator = path.lastIndexOf('/');
+  return separator <= 0 ? '/' : path.substring(0, separator);
+}
+
+String _basename(String path) => path.substring(path.lastIndexOf('/') + 1);
+
 Future<void> _runFileChecks(
   CloudProbeClient client,
   OAuthSession session,
@@ -353,6 +798,7 @@ Commands:
   login
   suite [search-query] [--path /scope] [--remote-file /file] [--limit N]
   roundtrip --confirm-write [--remote-file /unique-test-file.txt]
+  conflict-roundtrip --confirm-write
   refresh
   csrf
   dispatcher
@@ -379,6 +825,9 @@ Protocol overrides:
 
 The application password cannot be passed as a command-line option. Tokens and
 passwords are redacted from request logs. Upload is disabled unless the exact
---confirm-write flag is present.
+--confirm-write flag is present. conflict-roundtrip is destructive: it creates,
+replaces, renames, and deletes probe files; use it only with the dedicated test
+account. It generates all remote paths itself and never accepts a conflict mode
+from the command line.
 ''');
 }

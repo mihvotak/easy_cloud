@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../core/errors/cloud_failure.dart';
 import '../application/browser_repository.dart';
+import '../domain/cloud_folder_page.dart';
 import '../domain/cloud_node.dart';
 import '../domain/cloud_sort.dart';
 
@@ -23,11 +24,15 @@ final class BrowserController extends ChangeNotifier {
   bool isLoadingMore = false;
   CloudFailure? initialFailure;
   CloudFailure? loadMoreFailure;
+  CloudFolderPageSource source = CloudFolderPageSource.remote;
+  DateTime? cachedAt;
+  bool snapshotComplete = true;
+  CloudFailure? connectionFailure;
   int _generation = 0;
   int _nextOffset = 0;
   bool _disposed = false;
 
-  bool get hasMore => _nextOffset < totalCount;
+  bool get hasMore => snapshotComplete && _nextOffset < totalCount;
 
   Future<void> loadInitial() => _replace(initial: true);
 
@@ -46,20 +51,22 @@ final class BrowserController extends ChangeNotifier {
       isInitialLoading = true;
       items = const [];
       folder = null;
+      _nextOffset = 0;
+      totalCount = 0;
+      source = CloudFolderPageSource.remote;
+      cachedAt = null;
+      snapshotComplete = true;
     } else {
       isRefreshing = true;
     }
     initialFailure = null;
     loadMoreFailure = null;
+    connectionFailure = null;
     notifyListeners();
     try {
       final page = await _repository.listFolder(path, sort: sort);
       if (generation != _generation) return;
-      folder = page.folder;
-      items = page.items;
-      _nextOffset = page.items.length;
-      totalCount = page.totalCount;
-      sort = page.sort;
+      _replacePage(page);
     } on CloudFailure catch (failure) {
       if (generation == _generation) initialFailure = failure;
     } catch (_) {
@@ -81,13 +88,14 @@ final class BrowserController extends ChangeNotifier {
   Future<void> loadMore() async {
     if (isInitialLoading || isRefreshing || isLoadingMore || !hasMore) return;
     final generation = _generation;
+    final offset = _nextOffset;
     isLoadingMore = true;
     loadMoreFailure = null;
     _notifyListeners();
     try {
       final page = await _repository.listFolder(
         path,
-        offset: _nextOffset,
+        offset: offset,
         sort: sort,
       );
       if (generation != _generation) return;
@@ -96,10 +104,11 @@ final class BrowserController extends ChangeNotifier {
           .where((item) => knownPaths.add(item.path))
           .toList(growable: false);
       items = [...items, ...additions];
-      _nextOffset += page.items.length;
+      _nextOffset = offset + page.items.length;
       folder = page.folder;
       totalCount = page.items.isEmpty ? _nextOffset : page.totalCount;
       sort = page.sort;
+      _applyConnectionState(page);
     } on CloudFailure catch (failure) {
       if (generation == _generation) loadMoreFailure = failure;
     } catch (_) {
@@ -115,6 +124,29 @@ final class BrowserController extends ChangeNotifier {
         _notifyListeners();
       }
     }
+  }
+
+  Future<void> retryConnection() {
+    if (isInitialLoading || isRefreshing) return Future<void>.value();
+    return folder != null || items.isNotEmpty ? refresh() : loadInitial();
+  }
+
+  void _replacePage(CloudFolderPage page) {
+    folder = page.folder;
+    items = page.items;
+    _nextOffset = page.items.length;
+    totalCount = page.totalCount;
+    sort = page.sort;
+    _applyConnectionState(page);
+  }
+
+  void _applyConnectionState(CloudFolderPage page) {
+    source = page.source;
+    cachedAt = page.cachedAt;
+    snapshotComplete = page.snapshotComplete;
+    connectionFailure = page.source == CloudFolderPageSource.cache
+        ? page.connectionFailure
+        : null;
   }
 
   void _notifyListeners() {

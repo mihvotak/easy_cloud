@@ -5,6 +5,8 @@ import '../features/auth/presentation/auth_gate.dart';
 import '../features/browser/application/browser_repository.dart';
 import '../features/download/application/download_repository.dart';
 import '../features/offline/application/offline_file_index.dart';
+import '../features/open/application/file_opener.dart';
+import '../features/open/data/method_channel_file_opener.dart';
 import '../features/search/application/search_repository.dart';
 
 final class EasyCloudApp extends StatelessWidget {
@@ -14,6 +16,10 @@ final class EasyCloudApp extends StatelessWidget {
     required this.searchRepository,
     required this.downloadRepository,
     required this.offlineFileIndex,
+    required this.offlineTargetIndex,
+    required this.offlineTargetQueueStore,
+    this.fileOpener = const MethodChannelFileOpener(),
+    this.fileExporter,
     super.key,
   });
 
@@ -22,9 +28,14 @@ final class EasyCloudApp extends StatelessWidget {
   final SearchRepository searchRepository;
   final DownloadRepository downloadRepository;
   final OfflineFileIndex offlineFileIndex;
+  final OfflineTargetIndex offlineTargetIndex;
+  final OfflineTargetQueueStore offlineTargetQueueStore;
+  final FileOpener fileOpener;
+  final FileExporter? fileExporter;
 
   @override
   Widget build(BuildContext context) {
+    final opener = fileOpener;
     const background = Color(0xff0a0e14);
     const surface = Color(0xff111821);
     final colorScheme = ColorScheme.fromSeed(
@@ -84,6 +95,12 @@ final class EasyCloudApp extends StatelessWidget {
         searchRepository: searchRepository,
         downloadRepository: downloadRepository,
         offlineFileIndex: offlineFileIndex,
+        offlineTargetIndex: offlineTargetIndex,
+        offlineTargetQueueStore: offlineTargetQueueStore,
+        fileOpener: opener,
+        fileExporter:
+            fileExporter ??
+            (opener is FileExporter ? opener as FileExporter : null),
       ),
     );
   }

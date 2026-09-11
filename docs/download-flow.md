@@ -49,6 +49,46 @@ OAuth credentials or local object paths. Records are written after a verified
 cache hit or atomic commit and are shown in the account-scoped «Офлайн-файлы»
 screen.
 
+Foreground external opens do not create an `offline_files` binding. After
+cryptographic verification they touch an account-scoped durable
+`transient_objects` row (`hash`, `size`, `last_accessed_at`). Transient objects
+use an exact 524288000-byte (500 MiB) per-account LRU; hashes with an offline
+binding and the latest prepared open remain protected. A subsequent open makes
+the previous prepared hash eligible again. Pruning removes only final CAS
+objects, never `.part` files. Transient rows survive restart and are eligible
+on the next prune. After an authenticated account attach, resume or account
+sync, a deterministic reconciliation pass walks only canonical uppercase final
+objects for that account. Each hash is checked under the same download lock
+against direct/ready-target and transient references; only an unreferenced
+object is deleted. The pass never reads or hashes object contents, follows
+symlinks, touches `.part` files or changes SQLite ownership. Missing files are
+successes; filesystem/reference failures leave the candidate in place, other
+candidates continue in hash order, and the failure is retried on the next
+resume. An enumeration error aborts before deletion. Reconciliation is
+cancellable and awaited by repository shutdown.
+
+«Сохранить как» uses the same verified foreground preparation and CAS path
+validation as an external open, then launches Android SAF
+`ACTION_CREATE_DOCUMENT`. The destination URI is written as a stream with
+truncate semantics; the source is never loaded into memory and no storage
+permission, staging copy or persistable URI grant is used. A cancelled picker
+returns quietly. If a newer foreground action starts after the picker was
+launched, Android cannot cancel that already-visible picker; its eventual
+callback is nevertheless ignored by the stale Dart attempt and cannot show a
+snackbar for the old action.
+
+Successful online folder listings are stored as account-isolated paginated
+snapshot generations. A multi-page refresh is staged separately, so the last
+complete generation remains readable until its replacement is complete. On a
+network or timeout failure, the normal browser reads the cached generation and
+shows only a compact bottom connection panel with a retry action.
+
+Visible files use a batched SQLite lookup for persistent direct offline-ready
+markers. The tile marker API also distinguishes inherited folder pins, which
+will be populated by the recursive offline queue. Removing a direct pin is a
+local operation: it does not require network refresh and deletes the immutable
+content object only after the final same-account hash reference is removed.
+
 ## Resume experiment
 
 The binary transport resumes a useful `.part` with HTTP `Range`. Probe command

@@ -52,12 +52,19 @@ final class DownloadController extends ChangeNotifier {
   final _handles = <String, DownloadHandle>{};
   final _attempts = <String, int>{};
   final _subscriptions = <String, StreamSubscription<DownloadProgress>>{};
+  final _offlineRemovals = <String, int>{};
+  var _nextOfflineRemoval = 0;
   bool _disposed = false;
 
   DownloadItemState? stateFor(String path) => _states[path];
 
   void start(CloudNode node) {
-    if (_disposed || node.isFolder || _handles.containsKey(node.path)) return;
+    if (_disposed ||
+        node.isFolder ||
+        _handles.containsKey(node.path) ||
+        _offlineRemovals.containsKey(node.path)) {
+      return;
+    }
     final attempt = (_attempts[node.path] ?? 0) + 1;
     _attempts[node.path] = attempt;
     final handle = _repository.start(node);
@@ -83,6 +90,38 @@ final class DownloadController extends ChangeNotifier {
       notifyListeners();
     });
     unawaited(_watch(node, handle, attempt));
+  }
+
+  /// Removes the direct offline binding after cancelling an active download
+  /// for the same path. State is changed only after the repository confirms
+  /// that the unpin completed successfully.
+  Future<void> removeOffline(CloudNode node) async {
+    if (_disposed || node.isFolder) return;
+    final path = node.path;
+    if (_offlineRemovals.containsKey(path)) return;
+    final removal = ++_nextOfflineRemoval;
+    _offlineRemovals[path] = removal;
+
+    // Invalidate the watcher before cancelling so a late download completion
+    // cannot publish a state change while the unpin is still in flight.
+    _attempts[path] = (_attempts[path] ?? 0) + 1;
+    final handle = _handles.remove(path);
+    final subscription = _subscriptions.remove(path);
+    handle?.cancel();
+    unawaited(subscription?.cancel());
+
+    try {
+      await _repository.removeOffline(node);
+    } catch (_) {
+      if (_offlineRemovals[path] == removal) _offlineRemovals.remove(path);
+      if (_disposed) return;
+      rethrow;
+    }
+
+    if (_offlineRemovals[path] != removal) return;
+    _offlineRemovals.remove(path);
+    if (_disposed) return;
+    if (_states.remove(path) != null) notifyListeners();
   }
 
   void retry(CloudNode node) {
@@ -116,6 +155,7 @@ final class DownloadController extends ChangeNotifier {
 
   void reset() {
     if (_disposed) return;
+    _offlineRemovals.clear();
     for (final path in _handles.keys.toList(growable: false)) {
       _attempts[path] = (_attempts[path] ?? 0) + 1;
       _handles.remove(path)?.cancel();
@@ -178,12 +218,15 @@ final class DownloadController extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _offlineRemovals.clear();
     cancelAll();
     for (final subscription in _subscriptions.values) {
       unawaited(subscription.cancel());
     }
     _subscriptions.clear();
-    _repository.close();
+    // The repository is shared with OpenFileController and the recursive
+    // offline queue. Its composition owner closes it only after those
+    // controllers have stopped and the queue has settled.
     super.dispose();
   }
 }

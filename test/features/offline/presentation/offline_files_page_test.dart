@@ -113,6 +113,15 @@ final class _FakeOfflineFileIndex implements OfflineFileIndex {
   }
 
   @override
+  Future<Map<String, OfflineFileRecord>> lookup(
+    String email,
+    Iterable<String> paths,
+  ) async => const {};
+
+  @override
+  Future<bool> hasHashReference(String email, String hash) async => false;
+
+  @override
   Future<void> clearAccount(String email) async {}
 
   @override

@@ -91,4 +91,80 @@ void main() {
 
     expect(() => cache.paths('../not-a-hash'), throwsA(isA<ArgumentError>()));
   });
+
+  test('enumerates only sorted canonical final objects', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-cache');
+    addTearDown(() => root.delete(recursive: true));
+    final cache = ContentAddressedFileCache(root: root, email: 'user@mail.ru');
+    const firstHash = '00112233445566778899AABBCCDDEEFF00112233';
+    const secondHash = 'AABBCCDDEEFF00112233445566778899AABBCCDD';
+    const directoryHash = '11223344556677889900AABBCCDDEEFF11223344';
+    const symlinkHash = 'FFEEDDCCBBAA99887766554433221100FFEEDDCC';
+
+    final first = await cache.objectFile(firstHash);
+    await first.parent.create(recursive: true);
+    await first.writeAsBytes(const [1]);
+    final second = await cache.objectFile(secondHash);
+    await second.parent.create(recursive: true);
+    await second.writeAsBytes(const [2]);
+
+    final part = await cache.partFile(firstHash);
+    await part.writeAsBytes(const [3]);
+    await File('${first.path}.unknown').writeAsBytes(const [4]);
+    if (!Platform.isWindows) {
+      await File(
+        '${first.parent.path}${Platform.pathSeparator}${firstHash.toLowerCase()}',
+      ).writeAsBytes(const [5]);
+    }
+    final mismatchedDirectory = Directory(
+      '${first.parent.parent.path}${Platform.pathSeparator}CC',
+    );
+    await mismatchedDirectory.create(recursive: true);
+    final mismatched = File(
+      '${mismatchedDirectory.path}${Platform.pathSeparator}$firstHash',
+    );
+    await mismatched.writeAsBytes(const [6]);
+
+    final directoryObject = await cache.objectFile(directoryHash);
+    await Directory(directoryObject.path).create(recursive: true);
+    final symlinkObject = await cache.objectFile(symlinkHash);
+    await symlinkObject.parent.create(recursive: true);
+    final linkTarget = File('${root.path}${Platform.pathSeparator}outside');
+    await linkTarget.writeAsBytes(const [7]);
+    var symlinkCreated = false;
+    try {
+      await Link(symlinkObject.path).create(linkTarget.path);
+      symlinkCreated = true;
+    } on FileSystemException {
+      // Windows CI may not grant symlink creation to the test process.
+    }
+
+    final candidates = await cache.enumerateFinalObjects();
+
+    expect(candidates.map((candidate) => candidate.hash), [
+      firstHash,
+      secondHash,
+    ]);
+    expect(await part.exists(), isTrue);
+    expect(await File('${first.path}.unknown').exists(), isTrue);
+    expect(await mismatched.exists(), isTrue);
+    if (symlinkCreated) {
+      expect(
+        await FileSystemEntity.type(symlinkObject.path, followLinks: false),
+        FileSystemEntityType.link,
+      );
+    }
+  });
+
+  test('enumerating a missing account directory is a no-op', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-cache');
+    addTearDown(() => root.delete(recursive: true));
+
+    final candidates = await ContentAddressedFileCache(
+      root: root,
+      email: 'missing@mail.ru',
+    ).enumerateFinalObjects();
+
+    expect(candidates, isEmpty);
+  });
 }

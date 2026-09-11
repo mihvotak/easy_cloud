@@ -1,9 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../auth/presentation/auth_controller.dart';
 import '../../download/presentation/download_controller.dart';
 import '../../offline/application/offline_file_index.dart';
+import '../../offline/application/offline_target_queue_controller.dart';
+import '../../offline/presentation/offline_availability_controller.dart';
 import '../../offline/presentation/offline_files_page.dart';
+import '../../open/application/open_file_controller.dart';
+import '../../open/domain/open_file_failure.dart';
 import '../../search/application/search_repository.dart';
 import '../../search/presentation/search_page.dart';
 import '../application/browser_repository.dart';
@@ -17,8 +23,11 @@ final class BrowserPage extends StatefulWidget {
     required this.repository,
     required this.searchRepository,
     required this.downloadController,
+    required this.openFileController,
     required this.offlineFileIndex,
     required this.authController,
+    this.offlineTargetIndex,
+    this.offlineTargetQueueController,
     this.path = '/',
     this.title,
     super.key,
@@ -27,8 +36,11 @@ final class BrowserPage extends StatefulWidget {
   final BrowserRepository repository;
   final SearchRepository searchRepository;
   final DownloadController downloadController;
+  final OpenFileController openFileController;
   final OfflineFileIndex offlineFileIndex;
   final AuthController authController;
+  final OfflineTargetIndex? offlineTargetIndex;
+  final OfflineTargetQueueController? offlineTargetQueueController;
   final String path;
   final String? title;
 
@@ -39,6 +51,10 @@ final class BrowserPage extends StatefulWidget {
 final class _BrowserPageState extends State<BrowserPage> {
   late final BrowserController _controller;
   late final ScrollController _scrollController;
+  OfflineAvailabilityController? _availabilityController;
+  String? _availabilityEmail;
+  Set<String> _availabilityPaths = <String>{};
+  final _offlineOperations = <String>{};
 
   @override
   void initState() {
@@ -47,15 +63,90 @@ final class _BrowserPageState extends State<BrowserPage> {
       repository: widget.repository,
       path: widget.path,
     )..loadInitial();
+    _controller.addListener(_onVisibleItemsChanged);
     _scrollController = ScrollController()..addListener(_onScroll);
     widget.authController.addListener(_onAuthChanged);
+    widget.downloadController.addListener(_onDownloadChanged);
+    widget.openFileController.addListener(_onOpenFileChanged);
+    widget.offlineTargetQueueController?.addListener(_onQueueChanged);
+    _syncAvailabilityWithSession();
   }
 
   void _onAuthChanged() {
-    if (widget.authController.status == AuthStatus.signedIn || !mounted) return;
+    if (!mounted) return;
+    _syncAvailabilityWithSession();
+    if (widget.authController.status == AuthStatus.signedIn) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) Navigator.of(context).popUntil((route) => route.isFirst);
     });
+  }
+
+  void _onVisibleItemsChanged() => _loadAvailabilityForVisibleItems();
+
+  void _onAvailabilityChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onDownloadChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onOpenFileChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onQueueChanged() {
+    if (!mounted) return;
+    _loadAvailabilityForVisibleItems(force: true);
+  }
+
+  void _syncAvailabilityWithSession() {
+    final email = widget.authController.session?.email;
+    if (email == _availabilityEmail &&
+        (_availabilityController != null || email == null)) {
+      return;
+    }
+
+    _disposeAvailabilityController();
+    _availabilityEmail = email;
+    _availabilityPaths = <String>{};
+    if (email == null) return;
+
+    final controller = OfflineAvailabilityController(
+      index: widget.offlineFileIndex,
+      email: email,
+      targetIndex: widget.offlineTargetIndex,
+    );
+    _availabilityController = controller;
+    controller.addListener(_onAvailabilityChanged);
+    _loadAvailabilityForVisibleItems();
+  }
+
+  void _loadAvailabilityForVisibleItems({bool force = false}) {
+    final availabilityController = _availabilityController;
+    if (availabilityController == null) return;
+
+    final includeFolders =
+        widget.offlineTargetQueueController != null ||
+        widget.offlineTargetIndex != null;
+    final paths = widget.authController.session == null
+        ? <String>{}
+        : _controller.items
+              .where((node) => includeFolders || !node.isFolder)
+              .map((node) => node.path)
+              .toSet();
+    if (!force && _samePaths(_availabilityPaths, paths)) return;
+    _availabilityPaths = paths;
+    if (paths.isEmpty) return;
+    unawaited(availabilityController.load(paths));
+  }
+
+  void _disposeAvailabilityController() {
+    final controller = _availabilityController;
+    if (controller == null) return;
+    controller.removeListener(_onAvailabilityChanged);
+    controller.dispose();
+    _availabilityController = null;
   }
 
   void _onScroll() {
@@ -65,7 +156,12 @@ final class _BrowserPageState extends State<BrowserPage> {
   @override
   void dispose() {
     widget.authController.removeListener(_onAuthChanged);
+    widget.downloadController.removeListener(_onDownloadChanged);
+    widget.openFileController.removeListener(_onOpenFileChanged);
+    widget.offlineTargetQueueController?.removeListener(_onQueueChanged);
+    _controller.removeListener(_onVisibleItemsChanged);
     _scrollController.dispose();
+    _disposeAvailabilityController();
     _controller.dispose();
     super.dispose();
   }
@@ -114,7 +210,42 @@ final class _BrowserPageState extends State<BrowserPage> {
           ),
         ],
       ),
-      body: _buildBody(context),
+      body: Column(
+        children: [
+          Expanded(child: _buildBody(context)),
+          if (_controller.connectionFailure != null)
+            _buildConnectionPanel(context),
+        ],
+      ),
+    ),
+  );
+
+  Widget _buildConnectionPanel(BuildContext context) => SafeArea(
+    top: false,
+    child: Material(
+      color: Theme.of(context).colorScheme.surfaceContainer,
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(start: 16, end: 8),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Нет соединения',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton(
+              onPressed: _retryBrowserAndQueue,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, kMinInteractiveDimension),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              child: const Text('Повторить'),
+            ),
+          ],
+        ),
+      ),
     ),
   );
 
@@ -128,7 +259,7 @@ final class _BrowserPageState extends State<BrowserPage> {
         title: 'Не удалось открыть папку',
         message: failure.message,
         actionLabel: 'Повторить',
-        onAction: _controller.loadInitial,
+        onAction: _retryBrowserAndQueue,
       );
     }
     if (_controller.items.isEmpty) {
@@ -150,12 +281,45 @@ final class _BrowserPageState extends State<BrowserPage> {
         itemBuilder: (context, index) {
           if (index == _controller.items.length) return _buildFooter(context);
           final node = _controller.items[index];
+          final downloadState = widget.downloadController.stateFor(node.path);
+          final downloadActive = _isDownloadActive(downloadState);
+          final openProgress = widget.openFileController.progressFor(node.path);
+          final hasOpenProgress = openProgress != null;
           return CloudNodeTile(
             node: node,
-            onTap: () => node.isFolder
-                ? _openFolder(node)
-                : _showMetadata(context, node),
+            onTap: () => node.isFolder ? _openFolder(node) : _openFile(node),
             onInfo: () => _showMetadata(context, node),
+            onWorkOffline: node.isFolder
+                ? widget.offlineTargetQueueController == null ||
+                          !_folderAvailabilityKnown(node) ||
+                          _offlineOperations.contains(node.path)
+                      ? null
+                      : _offlinePolicyFor(node) == OfflinePolicy.onlineOnly
+                      ? () => _workOffline(node)
+                      : null
+                : () => widget.downloadController.start(node),
+            onOnlyOnline: node.isFolder
+                ? widget.offlineTargetQueueController == null ||
+                          !_folderAvailabilityKnown(node) ||
+                          _offlineOperations.contains(node.path)
+                      ? null
+                      : _isDirectTarget(node)
+                      ? () => _makeOnlyOnline(node)
+                      : null
+                : _offlineOperations.contains(node.path)
+                ? null
+                : () => _makeOnlyOnline(node),
+            onSaveAs: node.isFolder ? null : () => _saveAs(node),
+            offlinePolicy: _offlinePolicyFor(node),
+            offlineReadiness: _offlineReadinessFor(node),
+            progress: hasOpenProgress
+                ? openProgress.fraction
+                : downloadActive
+                ? downloadState?.fraction
+                : null,
+            progressIndeterminate: hasOpenProgress
+                ? openProgress.fraction == null
+                : downloadActive && downloadState?.fraction == null,
           );
         },
       ),
@@ -176,7 +340,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           children: [
             Text(failure.message, textAlign: TextAlign.center),
             TextButton(
-              onPressed: _controller.loadMore,
+              onPressed: () => _retryBrowserAndQueue(loadMore: true),
               child: const Text('Повторить'),
             ),
           ],
@@ -193,7 +357,10 @@ final class _BrowserPageState extends State<BrowserPage> {
           repository: widget.repository,
           searchRepository: widget.searchRepository,
           downloadController: widget.downloadController,
+          openFileController: widget.openFileController,
           offlineFileIndex: widget.offlineFileIndex,
+          offlineTargetIndex: widget.offlineTargetIndex,
+          offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
           path: folder.path,
           title: folder.name,
@@ -209,7 +376,10 @@ final class _BrowserPageState extends State<BrowserPage> {
           repository: widget.searchRepository,
           browserRepository: widget.repository,
           downloadController: widget.downloadController,
+          openFileController: widget.openFileController,
           offlineFileIndex: widget.offlineFileIndex,
+          offlineTargetIndex: widget.offlineTargetIndex,
+          offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
           path: widget.path,
         ),
@@ -234,7 +404,207 @@ final class _BrowserPageState extends State<BrowserPage> {
         node,
         downloadController: widget.downloadController,
       );
+
+  void _openFile(CloudNode node) {
+    unawaited(
+      widget.openFileController
+          .open(node)
+          .then<void>(
+            (_) {},
+            onError: (Object _, StackTrace _) {
+              // Keep the UI boundary safe even if an injected implementation
+              // violates the controller's typed-failure contract.
+              _showOpenFailure();
+            },
+          ),
+    );
+  }
+
+  void _showOpenFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text(OpenFileFailure.safeMessage)),
+      );
+  }
+
+  void _saveAs(CloudNode node) {
+    unawaited(
+      widget.openFileController
+          .saveAs(node)
+          .then<void>(
+            (_) {},
+            onError: (Object _, StackTrace _) {
+              // The controller suppresses stale attempts and picker
+              // cancellation. Only a current preparation/export failure
+              // reaches this generic presentation boundary.
+              _showSaveAsFailure();
+            },
+          ),
+    );
+  }
+
+  void _showSaveAsFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text(OpenFileFailure.safeSaveAsMessage)),
+      );
+  }
+
+  void _makeOnlyOnline(CloudNode node) {
+    unawaited(node.isFolder ? _removeTarget(node) : _removeOffline(node));
+  }
+
+  void _workOffline(CloudNode folder) {
+    unawaited(_enqueueOffline(folder));
+  }
+
+  Future<void> _enqueueOffline(CloudNode folder) async {
+    if (!_offlineOperations.add(folder.path)) return;
+    if (mounted) setState(() {});
+    try {
+      final estimate = estimateOfflineFolder(folder);
+      if (estimate.requiresConfirmation) {
+        if (!mounted) return;
+        final confirmed = await showOfflineFolderConfirmation(
+          context,
+          folder,
+          estimate,
+        );
+        if (confirmed != true) return;
+      }
+      final queue = widget.offlineTargetQueueController;
+      if (queue == null) throw StateError('Offline queue is unavailable.');
+      await queue.enqueue(folder, estimate.queueEstimate);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Не удалось сделать папку офлайн-доступной.'),
+        ),
+      );
+    } finally {
+      _offlineOperations.remove(folder.path);
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _removeTarget(CloudNode folder) async {
+    if (!_offlineOperations.add(folder.path)) return;
+    if (mounted) setState(() {});
+    try {
+      final queue = widget.offlineTargetQueueController;
+      if (queue == null) throw StateError('Offline queue is unavailable.');
+      await queue.remove(folder.path);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось отключить офлайн-доступ.')),
+      );
+    } finally {
+      _offlineOperations.remove(folder.path);
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _removeOffline(CloudNode node) async {
+    try {
+      await widget.downloadController.removeOffline(node);
+      await _reloadAvailability();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось отключить офлайн-доступ.')),
+      );
+    }
+  }
+
+  Future<void> _reloadAvailability() async {
+    final controller = _availabilityController;
+    if (controller == null) return;
+    await controller.load(_availabilityPaths);
+  }
+
+  Future<void> _retryBrowserAndQueue({bool loadMore = false}) async {
+    try {
+      if (loadMore) {
+        await _controller.loadMore();
+      } else {
+        await _controller.retryConnection();
+      }
+    } finally {
+      final queue = widget.offlineTargetQueueController;
+      final account = widget.authController.session?.email.trim().toLowerCase();
+      if (queue != null && account != null) {
+        try {
+          if (queue.email != account) {
+            await queue.attach(account);
+          } else {
+            await queue.retry();
+          }
+        } catch (_) {
+          // Browser retry remains useful even when the queue cannot retry yet.
+        }
+      }
+    }
+  }
+
+  OfflinePolicy _offlinePolicyFor(CloudNode node) {
+    final state = _availabilityController?.stateFor(node.path);
+    if (!node.isFolder &&
+        (state == null ||
+            state.source == OfflineAvailabilitySource.onlineOnly) &&
+        _directDownloadReady(node)) {
+      return OfflinePolicy.direct;
+    }
+    return switch (state?.source) {
+      OfflineAvailabilitySource.direct ||
+      OfflineAvailabilitySource.directTarget => OfflinePolicy.direct,
+      OfflineAvailabilitySource.inherited => OfflinePolicy.inherited,
+      OfflineAvailabilitySource.onlineOnly || null => OfflinePolicy.onlineOnly,
+    };
+  }
+
+  OfflineReadiness _offlineReadinessFor(CloudNode node) {
+    final state = _availabilityController?.stateFor(node.path);
+    if (!node.isFolder && _directDownloadReady(node)) {
+      return OfflineReadiness.ready;
+    }
+    if (state != null) return state.readiness;
+    return OfflineReadiness.idle;
+  }
+
+  bool _directDownloadReady(CloudNode node) =>
+      widget.downloadController.stateFor(node.path)?.status ==
+      DownloadItemStatus.ready;
+
+  bool _isDirectTarget(CloudNode node) =>
+      _availabilityController?.stateFor(node.path)?.source ==
+      OfflineAvailabilitySource.directTarget;
+
+  bool _folderAvailabilityKnown(CloudNode node) {
+    final controller = _availabilityController;
+    return node.isFolder &&
+        controller != null &&
+        !controller.isLoading &&
+        controller.stateFor(node.path) != null;
+  }
 }
+
+bool _isDownloadActive(DownloadItemState? state) {
+  final status = state?.status;
+  return status == DownloadItemStatus.resolving ||
+      status == DownloadItemStatus.receiving ||
+      status == DownloadItemStatus.verifying;
+}
+
+bool _samePaths(Set<String> left, Set<String> right) =>
+    left.length == right.length && left.containsAll(right);
 
 final class _EmptyFolder extends StatelessWidget {
   const _EmptyFolder();

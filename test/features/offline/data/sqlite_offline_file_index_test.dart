@@ -88,6 +88,88 @@ void main() {
     ]);
   });
 
+  test(
+    'lookup returns canonical existing paths and isolates accounts',
+    () async {
+      final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+      final index = _index(root);
+      addTearDown(() async {
+        await index.close();
+        await root.delete(recursive: true);
+      });
+
+      await index.upsert(
+        'first@mail.ru',
+        _record('docs/report.pdf', cachedAt: 1),
+      );
+      await index.upsert(
+        'first@mail.ru',
+        _record('/docs/notes.txt', cachedAt: 2),
+      );
+      await index.upsert(
+        'second@mail.ru',
+        _record('/docs/report.pdf', cachedAt: 3),
+      );
+
+      final result = await index.lookup(' FIRST@MAIL.RU ', [
+        'docs/report.pdf/',
+        '/docs/report.pdf',
+        'docs/missing.txt/',
+        '/docs/notes.txt',
+      ]);
+
+      expect(result.keys, containsAll(['/docs/report.pdf', '/docs/notes.txt']));
+      expect(result, hasLength(2));
+      expect(result['/docs/report.pdf']?.path, '/docs/report.pdf');
+      expect(
+        await index.lookup('second@mail.ru', ['docs/report.pdf']),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('lookup validates paths and has an empty fast path', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+    final index = _index(root);
+    addTearDown(() async {
+      await index.close();
+      await root.delete(recursive: true);
+    });
+
+    expect(await index.lookup('user@mail.ru', const []), isEmpty);
+    expect(await Directory(p.join(root.path, 'cloud_cache')).exists(), isFalse);
+    await expectLater(
+      index.lookup('user@mail.ru', ['/bad/../path']),
+      throwsA(isA<ArgumentError>()),
+    );
+  });
+
+  test('lookup chunks a large path set below SQLite variable limits', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+    final index = _index(root);
+    addTearDown(() async {
+      await index.close();
+      await root.delete(recursive: true);
+    });
+    const count = 1001;
+
+    for (var number = 0; number < count; number++) {
+      await index.upsert(
+        'bulk@mail.ru',
+        _record('/bulk/file-$number.txt', cachedAt: number),
+      );
+    }
+
+    final result = await index.lookup(
+      'bulk@mail.ru',
+      List.generate(count, (number) => 'bulk/file-$number.txt/'),
+    );
+
+    expect(result, hasLength(count));
+    expect(result['/bulk/file-0.txt']?.path, '/bulk/file-0.txt');
+    expect(result['/bulk/file-1000.txt']?.path, '/bulk/file-1000.txt');
+  });
+
   test('removes one path and clears only one account', () async {
     final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
     final index = _index(root);
@@ -108,6 +190,42 @@ void main() {
     await index.clearAccount('first@mail.ru');
     expect(await index.list('first@mail.ru'), isEmpty);
     expect(await index.list('second@mail.ru'), hasLength(1));
+  });
+
+  test('hasHashReference normalizes hashes and isolates accounts', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-offline');
+    final index = _index(root);
+    addTearDown(() async {
+      await index.close();
+      await root.delete(recursive: true);
+    });
+    const hash = '00112233445566778899AABBCCDDEEFF00112233';
+
+    await index.upsert(
+      'first@mail.ru',
+      _record('/first.txt', cachedAt: 1, hash: ' $hash '),
+    );
+    await index.upsert(
+      'second@mail.ru',
+      _record('/second.txt', cachedAt: 2, hash: hash),
+    );
+
+    expect(
+      await index.hasHashReference(' FIRST@MAIL.RU ', hash.toLowerCase()),
+      isTrue,
+    );
+    expect(await index.hasHashReference('second@mail.ru', hash), isTrue);
+    expect(
+      await index.hasHashReference(
+        'third@mail.ru',
+        '8899AABBCCDDEEFF00112233445566778899AABB',
+      ),
+      isFalse,
+    );
+
+    await index.remove('first@mail.ru', '/first.txt');
+    expect(await index.hasHashReference('first@mail.ru', hash), isFalse);
+    expect(await index.hasHashReference('second@mail.ru', hash), isTrue);
   });
 
   test('serializes concurrent lazy opens and upserts', () async {
@@ -204,7 +322,7 @@ void main() {
     expect(columnNames, isNot(contains('email')));
     expect(columnNames, contains('account_key'));
     expect(await database.rawQuery('PRAGMA user_version'), [
-      {'user_version': 1},
+      {'user_version': SqliteOfflineFileIndex.schemaVersion},
     ]);
     final rows = await database.query(SqliteOfflineFileIndex.tableName);
     expect(rows.single.values, isNot(contains(email)));
@@ -220,10 +338,11 @@ OfflineFileRecord _record(
   String path, {
   String name = 'file.txt',
   required int cachedAt,
+  String hash = '00112233445566778899AABBCCDDEEFF00112233',
 }) => OfflineFileRecord(
   path: path,
   name: name,
-  hash: '00112233445566778899AABBCCDDEEFF00112233',
+  hash: hash,
   size: 1,
   cachedAt: _time(cachedAt),
 );
