@@ -269,7 +269,7 @@ void main() {
         fail('expected preparation failure');
       }
 
-      final malformed = await prepareFailure(const [0xc3, 0x28]);
+      final malformed = await prepareFailure(const [0x98]);
       expect(malformed.type, EditorPreparationFailureType.malformedUtf8);
 
       final oversized = await prepareFailure(
@@ -278,6 +278,34 @@ void main() {
       expect(oversized.type, EditorPreparationFailureType.oversize);
     },
   );
+
+  test('prepares malformed UTF-8 as Windows-1251 when possible', () async {
+    final root = await Directory.systemTemp.createTemp('easy-cloud-cp1251');
+    addTearDown(() => root.delete(recursive: true));
+    final bytes = <int>[0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2];
+    final file = File('${root.path}/note.txt');
+    await file.writeAsBytes(bytes);
+    final node = CloudNode(
+      path: '/docs/note.txt',
+      name: 'note.txt',
+      type: CloudNodeType.file,
+      size: bytes.length,
+      hash: calculateCloudHash(bytes),
+    );
+    final handle = _FakeDownloadHandle();
+    final controller = OpenFileController(
+      _FakeDownloadRepository([handle]),
+      _RecordingFileOpener(),
+    );
+    addTearDown(controller.dispose);
+
+    final result = controller.prepareForEditor(node);
+    handle.complete(file);
+    final prepared = await result;
+
+    expect(prepared?.text, 'Привет');
+    expect(prepared?.encoding, EditorTextEncoding.windows1251);
+  });
 }
 
 CloudNode _node(String path, int size) => CloudNode(

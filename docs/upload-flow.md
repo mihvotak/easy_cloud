@@ -87,6 +87,8 @@ remote paths successfully.
 
 - [x] `/u` response grammar and upload shard extraction confirmed.
 - [ ] Empty and small uploads tested.
+- [x] The client registers 0-20 byte payloads directly from their
+  self-contained padded cloud hash instead of sending a short shard PUT.
 - [x] Upload response hash matches the local hash for the fixture.
 - [x] `file/add` root-level leading slash handling confirmed.
 - [x] `strict` rejects an existing path without modifying it.

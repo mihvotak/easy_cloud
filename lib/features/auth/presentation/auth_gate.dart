@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../application/auth_repository.dart';
 import '../../browser/application/browser_repository.dart';
 import '../../browser/presentation/browser_page.dart';
+import '../../browser/presentation/cloud_connection_controller.dart';
 import '../../download/application/download_repository.dart';
 import '../../download/presentation/download_controller.dart';
 import '../../editor/application/editor_save_repository.dart';
@@ -54,6 +55,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   late final DownloadController _downloadController;
   late final OpenFileController _openFileController;
   late final OfflineTargetQueueController _offlineTargetQueueController;
+  late final CloudConnectionController _connectionController;
   String? _downloadAccount;
   Future<void> _queueLifecycle = Future<void>.value();
   Future<void>? _shutdownFuture;
@@ -63,6 +65,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _connectionController = CloudConnectionController();
     _downloadController = DownloadController(widget.downloadRepository);
     final opener = widget.fileOpener;
     _openFileController = OpenFileController(
@@ -88,6 +91,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   void _onAuthChanged() {
     final account = _currentAccount;
     if (_downloadAccount != account) {
+      _connectionController.reset();
       _downloadController.reset();
       _openFileController.reset();
       _downloadAccount = account;
@@ -190,6 +194,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     _controller.removeListener(_onAuthChanged);
     _openFileController.dispose();
     _downloadController.dispose();
+    _connectionController.dispose();
     final shutdown = _shutdownFuture ??= _shutdown();
     unawaited(shutdown.catchError((_) {}));
     super.dispose();
@@ -256,6 +261,7 @@ final class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         offlineTargetIndex: widget.offlineTargetIndex,
         offlineTargetQueueController: _offlineTargetQueueController,
         authController: _controller,
+        connectionController: _connectionController,
       ),
     },
   );

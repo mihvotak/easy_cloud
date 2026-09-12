@@ -6,6 +6,7 @@ import '../../auth/presentation/auth_controller.dart';
 import '../../browser/application/browser_repository.dart';
 import '../../browser/domain/cloud_node.dart';
 import '../../browser/presentation/browser_page.dart';
+import '../../browser/presentation/cloud_connection_controller.dart';
 import '../../browser/presentation/cloud_node_widgets.dart';
 import '../../download/presentation/download_controller.dart';
 import '../../editor/application/editor_save_repository.dart';
@@ -25,6 +26,7 @@ final class SearchPage extends StatefulWidget {
     required this.authController,
     required this.downloadController,
     required this.openFileController,
+    this.connectionController,
     this.editorSaveService,
     required this.offlineFileIndex,
     this.offlineTargetIndex,
@@ -38,6 +40,7 @@ final class SearchPage extends StatefulWidget {
   final AuthController authController;
   final DownloadController downloadController;
   final OpenFileController openFileController;
+  final CloudConnectionController? connectionController;
   final EditorSaveService? editorSaveService;
   final OfflineFileIndex offlineFileIndex;
   final OfflineTargetIndex? offlineTargetIndex;
@@ -50,7 +53,10 @@ final class SearchPage extends StatefulWidget {
 
 final class _SearchPageState extends State<SearchPage> {
   late final SearchController _controller;
+  late final CloudConnectionController _connectionController;
+  late final Listenable _rebuildListenable;
   late final TextEditingController _textController;
+  var _ownsConnectionController = false;
   OfflineAvailabilityController? _availabilityController;
   String? _availabilityEmail;
   Set<String> _availabilityPaths = <String>{};
@@ -59,10 +65,19 @@ final class _SearchPageState extends State<SearchPage> {
   @override
   void initState() {
     super.initState();
+    final connectionController = widget.connectionController;
+    if (connectionController == null) {
+      _connectionController = CloudConnectionController();
+      _ownsConnectionController = true;
+    } else {
+      _connectionController = connectionController;
+    }
     _controller = SearchController(
       repository: widget.repository,
       path: widget.path,
+      connectionController: _connectionController,
     );
+    _rebuildListenable = Listenable.merge([_controller, _connectionController]);
     _controller.addListener(_onVisibleResultsChanged);
     _textController = TextEditingController();
     widget.authController.addListener(_onAuthChanged);
@@ -159,12 +174,13 @@ final class _SearchPageState extends State<SearchPage> {
     _textController.dispose();
     _disposeAvailabilityController();
     _controller.dispose();
+    if (_ownsConnectionController) _connectionController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _controller,
+    listenable: _rebuildListenable,
     builder: (context, _) => Scaffold(
       appBar: AppBar(title: const Text('Поиск')),
       body: SafeArea(
@@ -208,6 +224,36 @@ final class _SearchPageState extends State<SearchPage> {
               ),
             ),
             Expanded(child: _buildBody(context)),
+            if (_connectionController.isOffline) _buildConnectionPanel(context),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _buildConnectionPanel(BuildContext context) => SafeArea(
+    top: false,
+    child: Material(
+      color: Theme.of(context).colorScheme.surfaceContainer,
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(start: 16, end: 8),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Нет соединения',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton(
+              onPressed: _retryConnection,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, kMinInteractiveDimension),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              child: const Text('Повторить'),
+            ),
           ],
         ),
       ),
@@ -320,23 +366,34 @@ final class _SearchPageState extends State<SearchPage> {
   }
 
   void _openExternally(CloudNode node) {
-    unawaited(
-      widget.openFileController
-          .open(node)
-          .then<void>(
-            (_) {},
-            onError: (Object _, StackTrace _) {
-              _showOpenFailure();
-            },
-          ),
-    );
+    unawaited(_runExternalOpen(node));
+  }
+
+  Future<void> _runExternalOpen(CloudNode node) async {
+    bool? cacheHit;
+    try {
+      await widget.openFileController.open(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
+      await _refreshAfterForegroundSuccess(cacheHit);
+    } catch (_) {
+      await _probeAfterForegroundFailure();
+      _showOpenFailure();
+    }
   }
 
   Future<void> _openInEditor(CloudNode node) async {
     final account = widget.authController.session?.email.trim().toLowerCase();
+    bool? cacheHit;
     try {
-      final prepared = await widget.openFileController.prepareForEditor(node);
+      final prepared = await widget.openFileController.prepareForEditor(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
       if (!mounted || prepared == null) return;
+      await _refreshAfterForegroundSuccess(cacheHit);
+      if (!mounted) return;
       final currentAccount = widget.authController.session?.email
           .trim()
           .toLowerCase();
@@ -356,8 +413,11 @@ final class _SearchPageState extends State<SearchPage> {
         ),
       );
     } on EditorPreparationFailure catch (failure) {
-      if (!failure.isQuiet) _showEditorPreparationFailure(failure);
+      if (failure.isQuiet) return;
+      await _probeAfterForegroundFailure();
+      _showEditorPreparationFailure(failure);
     } catch (_) {
+      await _probeAfterForegroundFailure();
       _showEditorPreparationFailure(
         const EditorPreparationFailure(
           EditorPreparationFailureType.service,
@@ -374,13 +434,49 @@ final class _SearchPageState extends State<SearchPage> {
     if (mounted) await _reloadAvailability();
   }
 
+  Future<void> _refreshAfterForegroundSuccess(bool? cacheHit) async {
+    if (!mounted || !_connectionController.isOffline || cacheHit != false) {
+      return;
+    }
+    await _probeCurrentFolder();
+  }
+
+  Future<void> _probeAfterForegroundFailure() async {
+    if (!mounted) return;
+    await _probeCurrentFolder();
+  }
+
+  Future<void> _probeCurrentFolder() async {
+    final connectionEpoch = _connectionController.epoch;
+    try {
+      final page = await widget.browserRepository.listFolder(widget.path);
+      _connectionController.observeFolderPage(
+        page,
+        expectedEpoch: connectionEpoch,
+      );
+    } catch (error) {
+      _connectionController.observeListingFailure(
+        error,
+        expectedEpoch: connectionEpoch,
+      );
+    }
+  }
+
+  Future<void> _retryConnection() async {
+    if (_controller.query.length >= SearchController.minimumQueryLength) {
+      await _controller.search(_controller.query);
+    } else {
+      await _probeCurrentFolder();
+    }
+  }
+
   void _showEditorPreparationFailure(EditorPreparationFailure failure) {
     if (!mounted) return;
     final message = switch (failure.type) {
       EditorPreparationFailureType.oversize =>
-        'Текстовый файл превышает лимит 10 МиБ.',
+        'Текстовый файл превышает безопасный лимит редактора 2 МиБ. Используйте «Открыть вовне».',
       EditorPreparationFailureType.malformedUtf8 =>
-        'Файл содержит некорректный UTF-8.',
+        'Файл не удалось распознать как UTF-8 или Windows-1251.',
       EditorPreparationFailureType.integrity =>
         'Проверка содержимого файла не пройдена.',
       EditorPreparationFailureType.invalidResponse =>
@@ -419,16 +515,21 @@ final class _SearchPageState extends State<SearchPage> {
   }
 
   void _saveAs(CloudNode node) {
-    unawaited(
-      widget.openFileController
-          .saveAs(node)
-          .then<void>(
-            (_) {},
-            onError: (Object _, StackTrace _) {
-              _showSaveAsFailure();
-            },
-          ),
-    );
+    unawaited(_runSaveAs(node));
+  }
+
+  Future<void> _runSaveAs(CloudNode node) async {
+    bool? cacheHit;
+    try {
+      await widget.openFileController.saveAs(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
+      await _refreshAfterForegroundSuccess(cacheHit);
+    } catch (_) {
+      await _probeAfterForegroundFailure();
+      _showSaveAsFailure();
+    }
   }
 
   void _showSaveAsFailure() {
@@ -523,6 +624,7 @@ final class _SearchPageState extends State<SearchPage> {
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
+          connectionController: _connectionController,
           path: path,
           title: title,
         ),

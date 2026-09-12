@@ -22,12 +22,14 @@ final class OpenFileProgress {
     required this.bytes,
     required this.total,
     this.resumed = false,
+    this.cacheHit,
   });
 
   final DownloadPhase phase;
   final int bytes;
   final int? total;
   final bool resumed;
+  final bool? cacheHit;
 
   double? get fraction {
     final value = total;
@@ -53,6 +55,8 @@ final class OpenFileController extends ChangeNotifier {
   StreamSubscription<DownloadProgress>? _progressSubscription;
   String? _activePath;
   OpenFileProgress? _progress;
+  bool? _cacheHit;
+  bool? _lastSuccessfulCacheHit;
   var _attempt = 0;
   var _disposed = false;
 
@@ -62,22 +66,41 @@ final class OpenFileController extends ChangeNotifier {
 
   bool get isOpening => _activePath != null;
 
+  /// Whether the most recently completed foreground operation used a cached
+  /// object. A null value means that it did not complete successfully or that
+  /// the handle did not publish source information.
+  bool? get lastSuccessfulCacheHit => _lastSuccessfulCacheHit;
+
   /// Returns progress only for the currently active path.
   OpenFileProgress? progressFor(String path) =>
       _activePath == path ? _progress : null;
 
   /// Starts a new foreground open, cancelling and invalidating any previous
   /// operation first. Stale and cancelled operations complete silently.
-  Future<void> open(CloudNode node) async {
-    await _runForeground(node, action: _ForegroundAction.open);
+  Future<void> open(
+    CloudNode node, {
+    void Function(bool? cacheHit)? onSuccess,
+  }) async {
+    await _runForeground(
+      node,
+      action: _ForegroundAction.open,
+      onSuccess: onSuccess,
+    );
   }
 
   /// Downloads through the same foreground [DownloadRepository.startOpen]
   /// path as an external open, then strictly decodes the verified CAS object
   /// inside the application. It never invokes a platform opener/exporter and
   /// never creates a durable offline marker.
-  Future<PreparedEditorFile?> prepareForEditor(CloudNode node) async =>
-      await _runForeground(node, action: _ForegroundAction.prepareForEditor)
+  Future<PreparedEditorFile?> prepareForEditor(
+    CloudNode node, {
+    void Function(bool? cacheHit)? onSuccess,
+  }) async =>
+      await _runForeground(
+            node,
+            action: _ForegroundAction.prepareForEditor,
+            onSuccess: onSuccess,
+          )
           as PreparedEditorFile?;
 
   /// Prepares a verified transient CAS object and exports it through the
@@ -88,13 +111,21 @@ final class OpenFileController extends ChangeNotifier {
   /// action starts while Android owns the picker, the native result may still
   /// arrive because Android cannot cancel an already launched picker; the
   /// attempt check below discards that stale result and its UI effects.
-  Future<void> saveAs(CloudNode node) async {
-    await _runForeground(node, action: _ForegroundAction.saveAs);
+  Future<void> saveAs(
+    CloudNode node, {
+    void Function(bool? cacheHit)? onSuccess,
+  }) async {
+    await _runForeground(
+      node,
+      action: _ForegroundAction.saveAs,
+      onSuccess: onSuccess,
+    );
   }
 
   Future<Object?> _runForeground(
     CloudNode node, {
     required _ForegroundAction action,
+    void Function(bool? cacheHit)? onSuccess,
   }) async {
     if (_disposed || node.isFolder) return null;
 
@@ -133,7 +164,9 @@ final class OpenFileController extends ChangeNotifier {
           bytes: value.bytes,
           total: value.total,
           resumed: value.resumed,
+          cacheHit: value.cacheHit,
         );
+        _cacheHit = value.cacheHit;
         notifyListeners();
       });
       _progressSubscription = subscription;
@@ -148,14 +181,24 @@ final class OpenFileController extends ChangeNotifier {
           // shape again.
           await _fileOpener.openFile(file.absolute.path, node.name);
           if (!_isCurrent(attempt)) return null;
+          _recordSuccessfulCompletion(attempt, onSuccess);
         case _ForegroundAction.saveAs:
           final selected = await _fileExporter.saveFileAs(
             file.absolute.path,
             node.name,
           );
           if (!_isCurrent(attempt) || !selected) return null;
+          _recordSuccessfulCompletion(attempt, onSuccess);
         case _ForegroundAction.prepareForEditor:
-          return await _prepareEditorFile(node, file, startedHandle, attempt);
+          final prepared = await _prepareEditorFile(
+            node,
+            file,
+            startedHandle,
+            attempt,
+          );
+          if (!_isCurrent(attempt)) return null;
+          _recordSuccessfulCompletion(attempt, onSuccess);
+          return prepared;
       }
       return null;
     } catch (error, stackTrace) {
@@ -215,16 +258,16 @@ final class OpenFileController extends ChangeNotifier {
       );
     }
     _throwIfStale(attempt);
-    if (actualLength > editorMaxBytes) {
+    if (actualLength > inlineEditorMaxBytes) {
       throw const EditorPreparationFailure(
         EditorPreparationFailureType.oversize,
-        'Текстовый файл превышает лимит 10 МиБ.',
+        'Текстовый файл превышает безопасный лимит редактора 2 МиБ.',
       );
     }
 
     final bytes = await _readBounded(file, attempt);
     _throwIfStale(attempt);
-    if (bytes.length > editorMaxBytes) {
+    if (bytes.length > inlineEditorMaxBytes) {
       throw const EditorPreparationFailure(
         EditorPreparationFailureType.oversize,
         'Текстовый файл превышает лимит 10 МиБ.',
@@ -232,14 +275,14 @@ final class OpenFileController extends ChangeNotifier {
     }
     final finalLength = await file.length();
     _throwIfStale(attempt);
-    if (finalLength > editorMaxBytes || finalLength != bytes.length) {
+    if (finalLength > inlineEditorMaxBytes || finalLength != bytes.length) {
       throw const EditorPreparationFailure(
         EditorPreparationFailureType.integrity,
         'Проверка содержимого файла не пройдена.',
       );
     }
 
-    final content = decodeEditorUtf8(bytes);
+    final content = decodeEditorText(bytes);
     final verifiedNode = handle is VerifiedDownloadHandle
         ? handle.verifiedNode
         : null;
@@ -267,6 +310,7 @@ final class OpenFileController extends ChangeNotifier {
       remoteNode: remoteNode,
       text: content.text,
       hasUtf8Bom: content.hasUtf8Bom,
+      encoding: content.encoding,
       baseline: baseline,
       bytes: bytes,
     );
@@ -275,9 +319,9 @@ final class OpenFileController extends ChangeNotifier {
   Future<List<int>> _readBounded(File file, int attempt) async {
     final bytes = <int>[];
     try {
-      await for (final chunk in file.openRead(0, editorMaxBytes + 1)) {
+      await for (final chunk in file.openRead(0, inlineEditorMaxBytes + 1)) {
         _throwIfStale(attempt);
-        final remaining = editorMaxBytes + 1 - bytes.length;
+        final remaining = inlineEditorMaxBytes + 1 - bytes.length;
         if (remaining <= 0) break;
         if (chunk.length <= remaining) {
           bytes.addAll(chunk);
@@ -382,6 +426,15 @@ final class OpenFileController extends ChangeNotifier {
 
   bool _isCurrent(int attempt) => !_disposed && _attempt == attempt;
 
+  void _recordSuccessfulCompletion(
+    int attempt,
+    void Function(bool? cacheHit)? onSuccess,
+  ) {
+    if (!_isCurrent(attempt)) return;
+    _lastSuccessfulCacheHit = _cacheHit;
+    onSuccess?.call(_cacheHit);
+  }
+
   bool _isCancellation(Object error) =>
       error is DownloadCancelled ||
       error is DownloadFailure && error.isCancelled ||
@@ -395,6 +448,8 @@ final class OpenFileController extends ChangeNotifier {
     _progressSubscription = null;
     _activePath = null;
     _progress = null;
+    _cacheHit = null;
+    _lastSuccessfulCacheHit = null;
     handle?.cancel();
     unawaited(subscription?.cancel());
     if (notify && !_disposed) notifyListeners();

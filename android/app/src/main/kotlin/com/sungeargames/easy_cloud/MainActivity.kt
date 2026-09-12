@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.ActivityResultLauncher
@@ -63,29 +64,48 @@ class MainActivity : FlutterFragmentActivity() {
                 clipData = ClipData.newRawUri(safeDisplayName, uri)
             }
 
-            try {
-                startActivity(intent)
-            } catch (_: ActivityNotFoundException) {
-                result.error(NO_HANDLER_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
+            if (intent.resolveActivity(packageManager) == null) {
+                failOpen(result, NO_HANDLER_CODE)
                 return
             }
-            result.success(null)
-        } catch (_: InvalidOpenFileRequest) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
-        } catch (_: IOException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
-        } catch (_: SecurityException) {
-            result.error(OPEN_FAILED_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
-        } catch (_: ClassCastException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
-        } catch (_: IllegalArgumentException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_OPEN_ERROR_MESSAGE, null)
+
+            try {
+                startActivity(intent)
+            } catch (exception: ActivityNotFoundException) {
+                failOpen(result, NO_HANDLER_CODE, exception)
+                return
+            } catch (exception: SecurityException) {
+                failOpen(result, OPEN_FAILED_CODE, exception)
+                return
+            } catch (exception: RuntimeException) {
+                failOpen(result, OPEN_FAILED_CODE, exception)
+                return
+            }
+        } catch (exception: InvalidOpenFileRequest) {
+            failOpen(result, INVALID_ARGUMENT_CODE, exception)
+            return
+        } catch (exception: IOException) {
+            failOpen(result, INVALID_ARGUMENT_CODE, exception)
+            return
+        } catch (exception: SecurityException) {
+            failOpen(result, OPEN_FAILED_CODE, exception)
+            return
+        } catch (exception: ClassCastException) {
+            failOpen(result, INVALID_ARGUMENT_CODE, exception)
+            return
+        } catch (exception: IllegalArgumentException) {
+            failOpen(result, INVALID_ARGUMENT_CODE, exception)
+            return
+        } catch (exception: Exception) {
+            failOpen(result, OPEN_FAILED_CODE, exception)
+            return
         }
+        settleOpenSuccess(result)
     }
 
     private fun saveFileAs(call: MethodCall, result: MethodChannel.Result) {
         if (pendingExport != null) {
-            result.error(BUSY_CODE, SAFE_ERROR_MESSAGE, null)
+            failExport(result, BUSY_CODE)
             return
         }
 
@@ -100,36 +120,40 @@ class MainActivity : FlutterFragmentActivity() {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = mimeTypeFor(safeDisplayName)
                 putExtra(Intent.EXTRA_TITLE, safeDisplayName)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
             }
 
-            pendingExport = PendingExport(file, result)
+            if (intent.resolveActivity(packageManager) == null) {
+                failExport(result, NO_HANDLER_CODE)
+                return
+            }
+
+            val pending = PendingExport(file, result)
+            pendingExport = pending
             try {
                 createDocumentLauncher.launch(intent)
-            } catch (_: ActivityNotFoundException) {
-                pendingExport = null
-                result.error(NO_HANDLER_CODE, SAFE_ERROR_MESSAGE, null)
-            } catch (_: IllegalStateException) {
-                pendingExport = null
-                result.error(EXPORT_FAILED_CODE, SAFE_ERROR_MESSAGE, null)
-            } catch (_: SecurityException) {
-                pendingExport = null
-                result.error(EXPORT_FAILED_CODE, SAFE_ERROR_MESSAGE, null)
-            } catch (_: RuntimeException) {
+            } catch (exception: ActivityNotFoundException) {
+                failPendingExport(pending, NO_HANDLER_CODE, exception)
+            } catch (exception: Exception) {
                 // Do not leave a request permanently busy if the launcher
                 // rejects the intent before the picker is displayed.
-                pendingExport = null
-                result.error(EXPORT_FAILED_CODE, SAFE_ERROR_MESSAGE, null)
+                failPendingExport(pending, EXPORT_FAILED_CODE, exception)
             }
-        } catch (_: InvalidOpenFileRequest) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_ERROR_MESSAGE, null)
-        } catch (_: IOException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_ERROR_MESSAGE, null)
-        } catch (_: SecurityException) {
-            result.error(EXPORT_FAILED_CODE, SAFE_ERROR_MESSAGE, null)
-        } catch (_: ClassCastException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_ERROR_MESSAGE, null)
-        } catch (_: IllegalArgumentException) {
-            result.error(INVALID_ARGUMENT_CODE, SAFE_ERROR_MESSAGE, null)
+        } catch (exception: InvalidOpenFileRequest) {
+            failExport(result, INVALID_ARGUMENT_CODE, exception)
+        } catch (exception: IOException) {
+            failExport(result, INVALID_ARGUMENT_CODE, exception)
+        } catch (exception: SecurityException) {
+            failExport(result, EXPORT_FAILED_CODE, exception)
+        } catch (exception: ClassCastException) {
+            failExport(result, INVALID_ARGUMENT_CODE, exception)
+        } catch (exception: IllegalArgumentException) {
+            failExport(result, INVALID_ARGUMENT_CODE, exception)
+        } catch (exception: Exception) {
+            failExport(result, EXPORT_FAILED_CODE, exception)
         }
     }
 
@@ -138,13 +162,14 @@ class MainActivity : FlutterFragmentActivity() {
         pendingExport = null
 
         if (activityResult.resultCode != RESULT_OK) {
-            settleResult(pending.result, false)
+            logFailure(EXPORT_OPERATION, EXPORT_CANCELLED_CODE)
+            settleResult(pending.result, false, EXPORT_OPERATION)
             return
         }
 
         val destination = activityResult.data?.data
         if (destination == null) {
-            settleError(pending.result, EXPORT_FAILED_CODE)
+            failExport(pending.result, EXPORT_FAILED_CODE)
             return
         }
 
@@ -153,32 +178,87 @@ class MainActivity : FlutterFragmentActivity() {
             // canonical, final CAS object and never a path supplied by a user.
             val source = validateCasObject(pending.source.path)
             copyToUri(source, destination)
-            settleResult(pending.result, true)
-        } catch (_: InvalidOpenFileRequest) {
-            settleError(pending.result, INVALID_ARGUMENT_CODE)
-        } catch (_: IOException) {
-            settleError(pending.result, EXPORT_FAILED_CODE)
-        } catch (_: SecurityException) {
-            settleError(pending.result, EXPORT_FAILED_CODE)
-        } catch (_: IllegalArgumentException) {
-            settleError(pending.result, EXPORT_FAILED_CODE)
+        } catch (exception: InvalidOpenFileRequest) {
+            failExport(pending.result, INVALID_ARGUMENT_CODE, exception)
+            return
+        } catch (exception: IOException) {
+            failExport(pending.result, EXPORT_FAILED_CODE, exception)
+            return
+        } catch (exception: SecurityException) {
+            failExport(pending.result, EXPORT_FAILED_CODE, exception)
+            return
+        } catch (exception: Exception) {
+            failExport(pending.result, EXPORT_FAILED_CODE, exception)
+            return
+        }
+        settleResult(pending.result, true, EXPORT_OPERATION)
+    }
+
+    private fun settleOpenSuccess(result: MethodChannel.Result) {
+        try {
+            result.success(null)
+        } catch (exception: RuntimeException) {
+            logFailure(OPEN_OPERATION, RESULT_DELIVERY_FAILED_CODE, exception)
         }
     }
 
-    private fun settleResult(result: MethodChannel.Result, selected: Boolean) {
+    private fun settleResult(
+        result: MethodChannel.Result,
+        selected: Boolean,
+        operation: String,
+    ) {
         try {
             result.success(selected)
-        } catch (_: RuntimeException) {
-            // The engine may have detached while the picker was visible.
+        } catch (exception: RuntimeException) {
+            logFailure(operation, RESULT_DELIVERY_FAILED_CODE, exception)
         }
     }
 
-    private fun settleError(result: MethodChannel.Result, code: String) {
+    private fun settleError(
+        result: MethodChannel.Result,
+        code: String,
+        message: String,
+        operation: String,
+    ) {
         try {
-            result.error(code, SAFE_ERROR_MESSAGE, null)
-        } catch (_: RuntimeException) {
+            result.error(code, message, null)
+        } catch (exception: RuntimeException) {
             // The engine may have detached while the picker was visible.
+            logFailure(operation, RESULT_DELIVERY_FAILED_CODE, exception)
         }
+    }
+
+    private fun failOpen(
+        result: MethodChannel.Result,
+        code: String,
+        exception: Throwable? = null,
+    ) {
+        logFailure(OPEN_OPERATION, code, exception)
+        settleError(result, code, SAFE_OPEN_ERROR_MESSAGE, OPEN_OPERATION)
+    }
+
+    private fun failExport(
+        result: MethodChannel.Result,
+        code: String,
+        exception: Throwable? = null,
+    ) {
+        logFailure(EXPORT_OPERATION, code, exception)
+        settleError(result, code, SAFE_ERROR_MESSAGE, EXPORT_OPERATION)
+    }
+
+    private fun failPendingExport(
+        pending: PendingExport,
+        code: String,
+        exception: Throwable? = null,
+    ) {
+        if (pendingExport !== pending) return
+        pendingExport = null
+        failExport(pending.result, code, exception)
+    }
+
+    private fun logFailure(operation: String, code: String, exception: Throwable? = null) {
+        val exceptionClass = exception?.javaClass?.simpleName ?: NO_EXCEPTION
+        Log.e(LOG_TAG, "$operation code=$code exception=$exceptionClass")
     }
 
     private fun copyToUri(source: File, destination: Uri) {
@@ -270,7 +350,7 @@ class MainActivity : FlutterFragmentActivity() {
         // important so the old MethodChannel invocation cannot remain stuck.
         val pending = pendingExport
         pendingExport = null
-        pending?.result?.let { settleError(it, ACTIVITY_DESTROYED_CODE) }
+        pending?.result?.let { failExport(it, ACTIVITY_DESTROYED_CODE) }
         super.onDestroy()
     }
 
@@ -293,6 +373,12 @@ class MainActivity : FlutterFragmentActivity() {
         const val EXPORT_FAILED_CODE = "EXPORT_FAILED"
         const val ACTIVITY_DESTROYED_CODE = "ACTIVITY_DESTROYED"
         const val BUSY_CODE = "BUSY"
+        const val EXPORT_CANCELLED_CODE = "EXPORT_CANCELLED"
+        const val RESULT_DELIVERY_FAILED_CODE = "RESULT_DELIVERY_FAILED"
+        const val NO_EXCEPTION = "none"
+        const val OPEN_OPERATION = "open"
+        const val EXPORT_OPERATION = "export"
+        const val LOG_TAG = "EasyCloudFileBridge"
         const val SAFE_OPEN_ERROR_MESSAGE = "Не удалось открыть файл."
         const val SAFE_ERROR_MESSAGE = "Не удалось сохранить файл."
         const val CLOUD_CACHE_DIRECTORY = "cloud_cache"

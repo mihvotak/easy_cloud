@@ -1,3 +1,5 @@
+import 'cloud_node.dart';
+
 enum CloudSortField { name, size, modifiedAt }
 
 enum CloudSortOrder { ascending, descending }
@@ -49,3 +51,34 @@ const cloudSortOptions = [
   CloudSort(CloudSortField.size, CloudSortOrder.descending),
   CloudSort(CloudSortField.size, CloudSortOrder.ascending),
 ];
+
+int compareCloudNodes(CloudNode left, CloudNode right, CloudSort sort) {
+  final primary = switch (sort.field) {
+    CloudSortField.name => _compareNames(left.name, right.name),
+    CloudSortField.size => _compareNullable(
+      left.size,
+      right.size,
+      (a, b) => a.compareTo(b),
+    ),
+    CloudSortField.modifiedAt => _compareNullable(
+      left.modifiedAt,
+      right.modifiedAt,
+      (a, b) => a.compareTo(b),
+    ),
+  };
+  if (primary != 0) {
+    return sort.order == CloudSortOrder.ascending ? primary : -primary;
+  }
+  return left.path.compareTo(right.path);
+}
+
+int _compareNames(String left, String right) {
+  final folded = left.toLowerCase().compareTo(right.toLowerCase());
+  return folded == 0 ? left.compareTo(right) : folded;
+}
+
+int _compareNullable<T>(T? left, T? right, int Function(T, T) compare) {
+  if (left == null) return right == null ? 0 : -1;
+  if (right == null) return 1;
+  return compare(left, right);
+}

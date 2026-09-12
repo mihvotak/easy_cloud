@@ -84,6 +84,59 @@ void main() {
     expect(tester.getSize(find.byType(Card)).height, cardHeightWithProgress);
   });
 
+  testWidgets('animates active recursive readiness until it becomes ready', (
+    tester,
+  ) async {
+    const node = CloudNode(
+      path: '/Documents',
+      name: 'Documents',
+      type: CloudNodeType.folder,
+    );
+    const activeReadiness = [
+      OfflineReadiness.queued,
+      OfflineReadiness.downloading,
+      OfflineReadiness.verifying,
+    ];
+
+    for (final readiness in activeReadiness) {
+      await _pumpTile(
+        tester,
+        node: node,
+        availability: OfflineAvailability.onlineOnly,
+        policy: OfflinePolicy.direct,
+        readiness: readiness,
+        settle: false,
+      );
+
+      final indicator = tester.widget<CircularProgressIndicator>(
+        find.byType(CircularProgressIndicator),
+      );
+      expect(indicator.value, isNull);
+      expect(find.byTooltip('Офлайн-доступ: загрузка…'), findsOneWidget);
+      expect(find.bySemanticsLabel('Офлайн-доступ: загрузка…'), findsOneWidget);
+
+      // An indeterminate indicator must keep advancing while the target is
+      // active, rather than being a static replacement for the marker.
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    }
+
+    await _pumpTile(
+      tester,
+      node: node,
+      availability: OfflineAvailability.onlineOnly,
+      policy: OfflinePolicy.direct,
+      readiness: OfflineReadiness.ready,
+    );
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
+    expect(find.byTooltip('Доступен офлайн'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Офлайн-доступ: Доступен офлайн'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('builds the exact file menu for each availability state', (
     tester,
   ) async {
@@ -223,6 +276,7 @@ void main() {
       policy: OfflinePolicy.direct,
       readiness: OfflineReadiness.downloading,
       onOnlyOnline: () {},
+      settle: false,
     );
     expect(find.byTooltip('Офлайн-доступ: загрузка…'), findsOneWidget);
     expect(
@@ -231,9 +285,9 @@ void main() {
     );
     expect(find.bySemanticsLabel('Офлайн-доступ: загрузка…'), findsOneWidget);
 
-    await _openMenu(tester, node);
+    await _openMenu(tester, node, settle: false);
     expect(_menuItem(tester, 'Только онлайн').enabled, isTrue);
-    await _dismissMenu(tester);
+    await _dismissMenu(tester, settle: false);
 
     await _pumpTile(
       tester,
@@ -244,6 +298,8 @@ void main() {
       onOnlyOnline: () {},
     );
     expect(find.byTooltip('Офлайн-доступ: ошибка'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byIcon(Icons.check_box_outline_blank_rounded), findsOneWidget);
     await _openMenu(tester, node);
     expect(_menuItem(tester, 'Только онлайн').enabled, isFalse);
   });
@@ -300,11 +356,12 @@ void main() {
         policy: OfflinePolicy.direct,
         readiness: OfflineReadiness.queued,
         onOnlyOnline: () {},
+        settle: false,
       );
-      await _openMenu(tester, node);
+      await _openMenu(tester, node, settle: false);
       expect(find.text('Только онлайн'), findsOneWidget);
       expect(_menuItem(tester, 'Только онлайн').enabled, isTrue);
-      await _dismissMenu(tester);
+      await _dismissMenu(tester, settle: false);
 
       await _pumpTile(
         tester,
@@ -402,6 +459,7 @@ Future<void> _pumpTile(
   VoidCallback? onSaveAs,
   VoidCallback? onOpenExternally,
   VoidCallback? onTap,
+  bool settle = true,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -421,12 +479,24 @@ Future<void> _pumpTile(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump();
+  }
 }
 
-Future<void> _openMenu(WidgetTester tester, CloudNode node) async {
+Future<void> _openMenu(
+  WidgetTester tester,
+  CloudNode node, {
+  bool settle = true,
+}) async {
   await tester.tap(find.byTooltip('Действия для ${node.name}'));
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump(const Duration(milliseconds: 300));
+  }
 }
 
 PopupMenuItem<dynamic> _menuItem(WidgetTester tester, String label) =>
@@ -441,7 +511,11 @@ PopupMenuItem<dynamic> _menuItem(WidgetTester tester, String label) =>
           .first,
     );
 
-Future<void> _dismissMenu(WidgetTester tester) async {
+Future<void> _dismissMenu(WidgetTester tester, {bool settle = true}) async {
   await tester.tapAt(const Offset(1, 1));
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump(const Duration(milliseconds: 300));
+  }
 }

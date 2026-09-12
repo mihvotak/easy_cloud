@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:easy_cloud/core/errors/cloud_failure.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
+import 'package:easy_cloud/features/browser/presentation/cloud_connection_controller.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:easy_cloud/features/search/presentation/search_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -52,6 +53,30 @@ void main() {
     expect(controller.isLoading, isFalse);
     expect(controller.results, isEmpty);
   });
+
+  test(
+    'shares offline state without clearing it while a search is pending',
+    () async {
+      final response = Completer<List<CloudNode>>();
+      final connection = CloudConnectionController()
+        ..markOffline(const CloudFailure(CloudFailureType.network, 'offline'));
+      final controller = SearchController(
+        repository: _SearchRepository(responses: [response]),
+        connectionController: connection,
+      );
+      addTearDown(() {
+        controller.dispose();
+        connection.dispose();
+      });
+
+      final search = controller.search('report');
+      expect(connection.isOffline, isTrue);
+      response.complete([_node('/report.pdf')]);
+      await search;
+
+      expect(connection.isOffline, isFalse);
+    },
+  );
 
   test('completion after dispose does not notify or update state', () async {
     final response = Completer<List<CloudNode>>();

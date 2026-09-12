@@ -5,15 +5,20 @@ import '../application/browser_repository.dart';
 import '../domain/cloud_folder_page.dart';
 import '../domain/cloud_node.dart';
 import '../domain/cloud_sort.dart';
+import 'cloud_connection_controller.dart';
 
 final class BrowserController extends ChangeNotifier {
-  BrowserController({required BrowserRepository repository, required this.path})
-    : _repository = repository;
+  BrowserController({
+    required BrowserRepository repository,
+    required this.path,
+    this.connectionController,
+  }) : _repository = repository;
 
   static const pageSize = 100;
 
   final BrowserRepository _repository;
   final String path;
+  final CloudConnectionController? connectionController;
 
   List<CloudNode> items = const [];
   CloudNode? folder;
@@ -46,6 +51,7 @@ final class BrowserController extends ChangeNotifier {
 
   Future<void> _replace({required bool initial}) async {
     final generation = ++_generation;
+    final connectionEpoch = connectionController?.epoch;
     isLoadingMore = false;
     if (initial) {
       isInitialLoading = true;
@@ -66,9 +72,15 @@ final class BrowserController extends ChangeNotifier {
     try {
       final page = await _repository.listFolder(path, sort: sort);
       if (generation != _generation) return;
-      _replacePage(page);
+      _replacePage(page, connectionEpoch: connectionEpoch);
     } on CloudFailure catch (failure) {
       if (generation == _generation) initialFailure = failure;
+      if (generation == _generation) {
+        connectionController?.observeListingFailure(
+          failure,
+          expectedEpoch: connectionEpoch,
+        );
+      }
     } catch (_) {
       if (generation == _generation) {
         initialFailure = const CloudFailure(
@@ -88,6 +100,7 @@ final class BrowserController extends ChangeNotifier {
   Future<void> loadMore() async {
     if (isInitialLoading || isRefreshing || isLoadingMore || !hasMore) return;
     final generation = _generation;
+    final connectionEpoch = connectionController?.epoch;
     final offset = _nextOffset;
     isLoadingMore = true;
     loadMoreFailure = null;
@@ -104,13 +117,20 @@ final class BrowserController extends ChangeNotifier {
           .where((item) => knownPaths.add(item.path))
           .toList(growable: false);
       items = [...items, ...additions];
+      items.sort((left, right) => compareCloudNodes(left, right, sort));
       _nextOffset = offset + page.items.length;
       folder = page.folder;
       totalCount = page.items.isEmpty ? _nextOffset : page.totalCount;
       sort = page.sort;
-      _applyConnectionState(page);
+      _applyConnectionState(page, connectionEpoch: connectionEpoch);
     } on CloudFailure catch (failure) {
       if (generation == _generation) loadMoreFailure = failure;
+      if (generation == _generation) {
+        connectionController?.observeListingFailure(
+          failure,
+          expectedEpoch: connectionEpoch,
+        );
+      }
     } catch (_) {
       if (generation == _generation) {
         loadMoreFailure = const CloudFailure(
@@ -131,22 +151,27 @@ final class BrowserController extends ChangeNotifier {
     return folder != null || items.isNotEmpty ? refresh() : loadInitial();
   }
 
-  void _replacePage(CloudFolderPage page) {
+  void _replacePage(CloudFolderPage page, {int? connectionEpoch}) {
     folder = page.folder;
-    items = page.items;
+    items = [...page.items]
+      ..sort((left, right) => compareCloudNodes(left, right, page.sort));
     _nextOffset = page.items.length;
     totalCount = page.totalCount;
     sort = page.sort;
-    _applyConnectionState(page);
+    _applyConnectionState(page, connectionEpoch: connectionEpoch);
   }
 
-  void _applyConnectionState(CloudFolderPage page) {
+  void _applyConnectionState(CloudFolderPage page, {int? connectionEpoch}) {
     source = page.source;
     cachedAt = page.cachedAt;
     snapshotComplete = page.snapshotComplete;
     connectionFailure = page.source == CloudFolderPageSource.cache
         ? page.connectionFailure
         : null;
+    connectionController?.observeFolderPage(
+      page,
+      expectedEpoch: connectionEpoch,
+    );
   }
 
   void _notifyListeners() {

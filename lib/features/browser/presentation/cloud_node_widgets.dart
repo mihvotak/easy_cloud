@@ -425,6 +425,16 @@ final class _OfflineAvailabilityMarker extends StatelessWidget {
 
   Widget _buildVisual(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    if (_isActiveOfflineReadiness(presentation.readiness)) {
+      return SizedBox(
+        width: 17,
+        height: 17,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: colorScheme.primary,
+        ),
+      );
+    }
     if (presentation.readiness == OfflineReadiness.ready) {
       return switch (presentation.policy) {
         OfflinePolicy.onlineOnly => _outlineIcon(context),
@@ -491,6 +501,16 @@ final class _OfflinePresentationState {
   final OfflinePolicy policy;
   final OfflineReadiness readiness;
 }
+
+bool _isActiveOfflineReadiness(OfflineReadiness readiness) =>
+    switch (readiness) {
+      OfflineReadiness.queued ||
+      OfflineReadiness.downloading ||
+      OfflineReadiness.verifying => true,
+      OfflineReadiness.idle ||
+      OfflineReadiness.ready ||
+      OfflineReadiness.error => false,
+    };
 
 String _markerLabel(_OfflinePresentationState presentation) {
   if (presentation.readiness == OfflineReadiness.error) {

@@ -3475,29 +3475,7 @@ final class SqliteOfflineFileIndex
   }
 
   int _compareNodes(CloudNode left, CloudNode right, CloudSort sort) {
-    final primary = switch (sort.field) {
-      CloudSortField.name => left.name.compareTo(right.name),
-      CloudSortField.size => _compareNullable(
-        left.size,
-        right.size,
-        (a, b) => a.compareTo(b),
-      ),
-      CloudSortField.modifiedAt => _compareNullable(
-        left.modifiedAt,
-        right.modifiedAt,
-        (a, b) => a.compareTo(b),
-      ),
-    };
-    if (primary != 0) {
-      return sort.order == CloudSortOrder.ascending ? primary : -primary;
-    }
-    return left.path.compareTo(right.path);
-  }
-
-  int _compareNullable<T>(T? left, T? right, int Function(T, T) compare) {
-    if (left == null) return right == null ? 0 : -1;
-    if (right == null) return 1;
-    return compare(left, right);
+    return compareCloudNodes(left, right, sort);
   }
 
   Map<String, Object?> _toRow(String accountKey, OfflineFileRecord record) => {

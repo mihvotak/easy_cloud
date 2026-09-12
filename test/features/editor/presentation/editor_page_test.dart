@@ -369,6 +369,80 @@ void main() {
       encodeEditorUtf8('edited during dialog', hasUtf8Bom: false),
     );
   });
+
+  testWidgets('selection-only changes do not run exact encoding', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    var encodeCount = 0;
+    await tester.pumpWidget(
+      _app(
+        service,
+        exactEncoder: (text, {required hasUtf8Bom}) {
+          encodeCount++;
+          return encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    controller.selection = const TextSelection.collapsed(offset: 1);
+    await tester.pump();
+
+    expect(encodeCount, 0);
+    expect(_saveButton(tester).onPressed, isNull);
+  });
+
+  testWidgets('asks how to save Windows-1251 once per editor session', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, encoding: EditorTextEncoding.windows1251),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'Привет');
+    await tester.pump();
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+    expect(find.text('Кодировка файла'), findsOneWidget);
+    await tester.tap(find.text('Windows-1251'));
+    await tester.pumpAndSettle();
+    expect(service.savedBytes.single, encodeWindows1251('Привет'));
+
+    await tester.enterText(find.byType(TextField), 'Пока');
+    await tester.pump();
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+    expect(find.text('Кодировка файла'), findsNothing);
+    expect(service.savedBytes.last, encodeWindows1251('Пока'));
+  });
+
+  testWidgets('can convert Windows-1251 to UTF-8 on first save', (
+    tester,
+  ) async {
+    final service = _FakeEditorSaveService();
+    await tester.pumpWidget(
+      _app(service, encoding: EditorTextEncoding.windows1251),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'Привет ☁');
+    await tester.pump();
+    await tester.tap(_saveButtonFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('UTF-8'));
+    await tester.pumpAndSettle();
+
+    expect(
+      service.savedBytes.single,
+      encodeEditorUtf8('Привет ☁', hasUtf8Bom: false),
+    );
+  });
 }
 
 final Finder _saveButtonFinder = find.byIcon(Icons.save_rounded);
@@ -381,21 +455,25 @@ Widget _app(
   EditorSaveService service, {
   Duration debounce = Duration.zero,
   bool hasUtf8Bom = false,
+  EditorTextEncoding encoding = EditorTextEncoding.utf8,
   EditorExactEncoder? exactEncoder,
-}) =>
-    MaterialApp(home: _EditorHost(service, debounce, hasUtf8Bom, exactEncoder));
+}) => MaterialApp(
+  home: _EditorHost(service, debounce, hasUtf8Bom, encoding, exactEncoder),
+);
 
 final class _EditorHost extends StatefulWidget {
   const _EditorHost(
     this.service,
     this.debounce,
     this.hasUtf8Bom,
+    this.encoding,
     this.exactEncoder,
   );
 
   final EditorSaveService service;
   final Duration debounce;
   final bool hasUtf8Bom;
+  final EditorTextEncoding encoding;
   final EditorExactEncoder? exactEncoder;
 
   @override
@@ -415,6 +493,7 @@ final class _EditorHostState extends State<_EditorHost> {
               '/docs/note.txt',
               'original',
               hasUtf8Bom: widget.hasUtf8Bom,
+              encoding: widget.encoding,
             ),
             editorSaveService: widget.service,
             exactEncodingDebounce: widget.debounce,
@@ -433,8 +512,11 @@ PreparedEditorFile _prepared(
   String path,
   String text, {
   bool hasUtf8Bom = false,
+  EditorTextEncoding encoding = EditorTextEncoding.utf8,
 }) {
-  final bytes = encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
+  final bytes = encoding == EditorTextEncoding.windows1251
+      ? encodeWindows1251(text)
+      : encodeEditorUtf8(text, hasUtf8Bom: hasUtf8Bom);
   final node = CloudNode(
     path: path,
     name: path.substring(path.lastIndexOf('/') + 1),
@@ -447,6 +529,7 @@ PreparedEditorFile _prepared(
     remoteNode: node,
     text: text,
     hasUtf8Bom: hasUtf8Bom,
+    encoding: encoding,
     baseline: EditorSaveBaseline(
       path: path,
       hash: node.hash!,

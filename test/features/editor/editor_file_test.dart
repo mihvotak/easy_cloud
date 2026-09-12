@@ -74,6 +74,26 @@ void main() {
     );
   });
 
+  test('falls back to Windows-1251 and round-trips Cyrillic text', () {
+    final bytes = <int>[0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2, 0x21];
+    final content = decodeEditorText(bytes);
+
+    expect(content.encoding, EditorTextEncoding.windows1251);
+    expect(content.hasUtf8Bom, isFalse);
+    expect(content.text, 'Привет!');
+    expect(encodeWindows1251(content.text), bytes);
+  });
+
+  test('valid UTF-8 wins and unsupported Windows-1251 text is rejected', () {
+    final content = decodeEditorText(utf8.encode('Привет'));
+    expect(content.encoding, EditorTextEncoding.utf8);
+    expect(() => encodeWindows1251('cloud ☁'), throwsFormatException);
+    expect(
+      () => decodeEditorText(const [0x98]),
+      throwsA(isA<EditorPreparationFailure>()),
+    );
+  });
+
   test('editor byte limit counts the BOM', () {
     final exact = List<int>.filled(editorMaxBytes, 0x61, growable: false);
     final plusOne = <int>[

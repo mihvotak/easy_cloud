@@ -69,6 +69,13 @@ generates the paths and accepts no conflict-mode or remote-path override.
 test account whose probe files may be replaced and deleted. Live capability
 results are dated in the command output and are not assumed by this README.
 
+To verify the 0/1/2/20/21-byte protocol boundary and clean up every generated
+path, run:
+
+```bash
+dart run tool/cloud_probe/cloud_probe.dart tiny-roundtrip --confirm-write
+```
+
 Do not put these variables in a committed `.env` file, shell script, IDE launch
 configuration, or test fixture. The password is intentionally not accepted as
 a command-line argument because command lines may be visible to other processes.

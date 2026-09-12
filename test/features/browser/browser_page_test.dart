@@ -12,6 +12,7 @@ import 'package:easy_cloud/features/browser/domain/cloud_folder_page.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_node.dart';
 import 'package:easy_cloud/features/browser/domain/cloud_sort.dart';
 import 'package:easy_cloud/features/browser/presentation/browser_page.dart';
+import 'package:easy_cloud/features/browser/presentation/cloud_connection_controller.dart';
 import 'package:easy_cloud/features/download/application/download_repository.dart';
 import 'package:easy_cloud/features/download/domain/download_handle.dart';
 import 'package:easy_cloud/features/download/domain/download_progress.dart';
@@ -19,6 +20,7 @@ import 'package:easy_cloud/features/download/presentation/download_controller.da
 import 'package:easy_cloud/features/offline/application/offline_file_index.dart';
 import 'package:easy_cloud/features/open/application/file_opener.dart';
 import 'package:easy_cloud/features/open/application/open_file_controller.dart';
+import 'package:easy_cloud/features/open/domain/open_file_failure.dart';
 import 'package:easy_cloud/features/search/application/search_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -138,6 +140,218 @@ void main() {
     expect(find.text('photo.jpg'), findsOneWidget);
     auth.dispose();
     downloads.dispose();
+  });
+
+  testWidgets('keeps a child connectivity failure visible after returning', (
+    tester,
+  ) async {
+    final auth = AuthController(
+      AuthRepository(api: _NoopAuthApi(), store: MemorySessionStore()),
+    );
+    final downloads = DownloadController(_NoopDownloadRepository());
+    final connection = CloudConnectionController();
+    final repository = _ChildFailureRepository();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BrowserPage(
+          repository: repository,
+          searchRepository: _NoopSearchRepository(),
+          downloadController: downloads,
+          openFileController: _openFileController(),
+          offlineFileIndex: _NoopOfflineFileIndex(),
+          authController: auth,
+          connectionController: connection,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Documents'));
+    await tester.pumpAndSettle();
+    expect(connection.isOffline, isTrue);
+    expect(find.text('Не удалось открыть папку'), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Нет соединения'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    connection.dispose();
+    downloads.dispose();
+    auth.dispose();
+  });
+
+  testWidgets('refreshes after a remote foreground open while offline', (
+    tester,
+  ) async {
+    final auth = AuthController(
+      AuthRepository(api: _NoopAuthApi(), store: MemorySessionStore()),
+    );
+    final downloadRepository = _ControllableDownloadRepository();
+    final downloads = DownloadController(downloadRepository);
+    final opens = _openFileController(downloadRepository, _NoopFileOpener());
+    final connection = CloudConnectionController();
+    final failure = const CloudFailure(CloudFailureType.network, 'offline');
+    final repository = _QueueBrowserRepository([
+      _browserPage(
+        '/cached.txt',
+        source: CloudFolderPageSource.cache,
+        connectionFailure: failure,
+      ),
+      _browserPage('/remote.txt'),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BrowserPage(
+          repository: repository,
+          searchRepository: _NoopSearchRepository(),
+          downloadController: downloads,
+          openFileController: opens,
+          offlineFileIndex: _NoopOfflineFileIndex(),
+          authController: auth,
+          connectionController: connection,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Нет соединения'), findsOneWidget);
+
+    await tester.tap(find.text('cached.txt'));
+    await tester.pump();
+    downloadRepository.progress.add(
+      const DownloadProgress(
+        phase: DownloadPhase.receiving,
+        bytes: 1,
+        total: 1,
+        resumed: false,
+        cacheHit: false,
+      ),
+    );
+    downloadRepository.result.complete(File('/cache/cached.txt'));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(opens.lastSuccessfulCacheHit, isFalse);
+    expect(repository.calls, 2);
+    expect(find.text('remote.txt'), findsOneWidget);
+    expect(find.text('Нет соединения'), findsNothing);
+    expect(connection.isOffline, isFalse);
+
+    await tester.pumpWidget(const SizedBox());
+    opens.dispose();
+    connection.dispose();
+    downloads.dispose();
+    auth.dispose();
+  });
+
+  testWidgets('cache-hit foreground success does not prove connectivity', (
+    tester,
+  ) async {
+    final auth = AuthController(
+      AuthRepository(api: _NoopAuthApi(), store: MemorySessionStore()),
+    );
+    final downloadRepository = _ControllableDownloadRepository();
+    final downloads = DownloadController(downloadRepository);
+    final opens = _openFileController(downloadRepository, _NoopFileOpener());
+    final connection = CloudConnectionController();
+    final failure = const CloudFailure(CloudFailureType.network, 'offline');
+    final repository = _QueueBrowserRepository([
+      _browserPage(
+        '/cached.txt',
+        source: CloudFolderPageSource.cache,
+        connectionFailure: failure,
+      ),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BrowserPage(
+          repository: repository,
+          searchRepository: _NoopSearchRepository(),
+          downloadController: downloads,
+          openFileController: opens,
+          offlineFileIndex: _NoopOfflineFileIndex(),
+          authController: auth,
+          connectionController: connection,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('cached.txt'));
+    await tester.pump();
+    downloadRepository.progress.add(
+      const DownloadProgress(
+        phase: DownloadPhase.committed,
+        bytes: 1,
+        total: 1,
+        resumed: false,
+        cacheHit: true,
+      ),
+    );
+    downloadRepository.result.complete(File('/cache/cached.txt'));
+    await tester.pumpAndSettle();
+
+    expect(repository.calls, 1);
+    expect(find.text('Нет соединения'), findsOneWidget);
+    expect(connection.isOffline, isTrue);
+
+    await tester.pumpWidget(const SizedBox());
+    opens.dispose();
+    connection.dispose();
+    downloads.dispose();
+    auth.dispose();
+  });
+
+  testWidgets('failed foreground open probes the current folder', (
+    tester,
+  ) async {
+    final auth = AuthController(
+      AuthRepository(api: _NoopAuthApi(), store: MemorySessionStore()),
+    );
+    final downloadRepository = _ControllableDownloadRepository();
+    final downloads = DownloadController(downloadRepository);
+    final opens = _openFileController(downloadRepository, _NoopFileOpener());
+    final connection = CloudConnectionController();
+    final repository = _QueueBrowserRepository([
+      _browserPage('/remote.txt'),
+      const CloudFailure(CloudFailureType.network, 'offline'),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BrowserPage(
+          repository: repository,
+          searchRepository: _NoopSearchRepository(),
+          downloadController: downloads,
+          openFileController: opens,
+          offlineFileIndex: _NoopOfflineFileIndex(),
+          authController: auth,
+          connectionController: connection,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('remote.txt'));
+    await tester.pump();
+    downloadRepository.result.completeError(StateError('private failure'));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(connection.isOffline, isTrue);
+    expect(find.text('Нет соединения'), findsOneWidget);
+    expect(find.text(OpenFileFailure.safeMessage), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    opens.dispose();
+    connection.dispose();
+    downloads.dispose();
+    auth.dispose();
   });
 
   testWidgets('opens a file through the foreground controller', (tester) async {
@@ -811,10 +1025,44 @@ final class _TreeRepository implements BrowserRepository {
   void close() {}
 }
 
+final class _ChildFailureRepository implements BrowserRepository {
+  @override
+  Future<CloudFolderPage> listFolder(
+    String path, {
+    int offset = 0,
+    int limit = 100,
+    CloudSort sort = CloudSort.nameAscending,
+  }) async {
+    if (path != '/') {
+      throw const CloudFailure(CloudFailureType.network, 'offline');
+    }
+    return CloudFolderPage(
+      folder: const CloudNode(
+        path: '/',
+        name: 'Облако',
+        type: CloudNodeType.folder,
+      ),
+      items: const [
+        CloudNode(
+          path: '/Documents',
+          name: 'Documents',
+          type: CloudNodeType.folder,
+        ),
+      ],
+      totalCount: 1,
+      sort: sort,
+    );
+  }
+
+  @override
+  void close() {}
+}
+
 final class _QueueBrowserRepository implements BrowserRepository {
   _QueueBrowserRepository(this.results);
 
   final List<Object> results;
+  var calls = 0;
 
   @override
   Future<CloudFolderPage> listFolder(
@@ -823,6 +1071,7 @@ final class _QueueBrowserRepository implements BrowserRepository {
     int limit = 100,
     CloudSort sort = CloudSort.nameAscending,
   }) async {
+    calls++;
     final result = results.removeAt(0);
     if (result is CloudFailure) throw result;
     return result as CloudFolderPage;

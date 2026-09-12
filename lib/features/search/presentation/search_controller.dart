@@ -2,16 +2,21 @@ import 'package:flutter/foundation.dart';
 
 import '../../../core/errors/cloud_failure.dart';
 import '../../browser/domain/cloud_node.dart';
+import '../../browser/presentation/cloud_connection_controller.dart';
 import '../application/search_repository.dart';
 
 final class SearchController extends ChangeNotifier {
-  SearchController({required SearchRepository repository, this.path = '/'})
-    : _repository = repository;
+  SearchController({
+    required SearchRepository repository,
+    this.path = '/',
+    this.connectionController,
+  }) : _repository = repository;
 
   static const minimumQueryLength = 2;
 
   final SearchRepository _repository;
   final String path;
+  final CloudConnectionController? connectionController;
 
   List<CloudNode> results = const [];
   String query = '';
@@ -25,6 +30,7 @@ final class SearchController extends ChangeNotifier {
 
   Future<void> search(String value) async {
     final generation = ++_generation;
+    final connectionEpoch = connectionController?.epoch;
     query = value.trim();
     hasSearched = true;
     isQueryTooShort = query.length < minimumQueryLength;
@@ -39,8 +45,15 @@ final class SearchController extends ChangeNotifier {
       final found = await _repository.search(query, path: path);
       if (!_isCurrent(generation)) return;
       results = found;
+      connectionController?.markOnline(expectedEpoch: connectionEpoch);
     } on CloudFailure catch (failure) {
-      if (_isCurrent(generation)) error = failure;
+      if (_isCurrent(generation)) {
+        error = failure;
+        connectionController?.observeListingFailure(
+          failure,
+          expectedEpoch: connectionEpoch,
+        );
+      }
     } catch (_) {
       if (_isCurrent(generation)) {
         error = const CloudFailure(

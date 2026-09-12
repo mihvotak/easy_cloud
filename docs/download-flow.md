@@ -83,9 +83,13 @@ Supported final extensions are `txt`, `md`, `json`, `xml`, `yaml`, `yml`,
 `csv`, `log`, `ini`, and `conf` (case-insensitive). Browser and search rows
 prepare editor content through the same transient `startOpen` CAS path as an
 external open; preparation never creates an offline marker or invokes the
-platform opener. The verified bytes are decoded as strict UTF-8, with a
-leading UTF-8 BOM retained as metadata and all line endings left unchanged.
-The encoded payload, including a BOM, must not exceed 10485760 bytes (10 MiB).
+platform opener. The verified bytes are decoded as strict UTF-8 first and as
+Windows-1251 only when UTF-8 is malformed. A leading UTF-8 BOM is retained as
+metadata and all line endings stay unchanged. The first save of a Windows-1251
+file asks whether to preserve that encoding or convert to UTF-8, and remembers
+the choice until the editor closes. Because Flutter EditableText lays out the
+whole document, inline rendering is limited to 2 MiB to prevent Android
+ANRs/crashes; larger files remain available through the external opener.
 
 Saving captures the remote path, cloud hash, size, modification time, revision,
 and global revision. A fresh stat is compared before upload. If the remote file

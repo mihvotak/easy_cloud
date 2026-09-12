@@ -18,6 +18,7 @@ import '../application/browser_repository.dart';
 import '../domain/cloud_node.dart';
 import '../domain/cloud_sort.dart';
 import 'browser_controller.dart';
+import 'cloud_connection_controller.dart';
 import 'cloud_node_widgets.dart';
 
 final class BrowserPage extends StatefulWidget {
@@ -29,6 +30,7 @@ final class BrowserPage extends StatefulWidget {
     this.editorSaveService,
     required this.offlineFileIndex,
     required this.authController,
+    this.connectionController,
     this.offlineTargetIndex,
     this.offlineTargetQueueController,
     this.path = '/',
@@ -43,6 +45,7 @@ final class BrowserPage extends StatefulWidget {
   final EditorSaveService? editorSaveService;
   final OfflineFileIndex offlineFileIndex;
   final AuthController authController;
+  final CloudConnectionController? connectionController;
   final OfflineTargetIndex? offlineTargetIndex;
   final OfflineTargetQueueController? offlineTargetQueueController;
   final String path;
@@ -54,7 +57,10 @@ final class BrowserPage extends StatefulWidget {
 
 final class _BrowserPageState extends State<BrowserPage> {
   late final BrowserController _controller;
+  late final CloudConnectionController _connectionController;
+  late final Listenable _rebuildListenable;
   late final ScrollController _scrollController;
+  var _ownsConnectionController = false;
   OfflineAvailabilityController? _availabilityController;
   String? _availabilityEmail;
   Set<String> _availabilityPaths = <String>{};
@@ -63,10 +69,19 @@ final class _BrowserPageState extends State<BrowserPage> {
   @override
   void initState() {
     super.initState();
+    final connectionController = widget.connectionController;
+    if (connectionController == null) {
+      _connectionController = CloudConnectionController();
+      _ownsConnectionController = true;
+    } else {
+      _connectionController = connectionController;
+    }
     _controller = BrowserController(
       repository: widget.repository,
       path: widget.path,
+      connectionController: _connectionController,
     )..loadInitial();
+    _rebuildListenable = Listenable.merge([_controller, _connectionController]);
     _controller.addListener(_onVisibleItemsChanged);
     _scrollController = ScrollController()..addListener(_onScroll);
     widget.authController.addListener(_onAuthChanged);
@@ -167,12 +182,13 @@ final class _BrowserPageState extends State<BrowserPage> {
     _scrollController.dispose();
     _disposeAvailabilityController();
     _controller.dispose();
+    if (_ownsConnectionController) _connectionController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _controller,
+    listenable: _rebuildListenable,
     builder: (context, _) => Scaffold(
       appBar: AppBar(
         title: Text(widget.title ?? _controller.folder?.name ?? 'Easy Cloud'),
@@ -217,7 +233,9 @@ final class _BrowserPageState extends State<BrowserPage> {
       body: Column(
         children: [
           Expanded(child: _buildBody(context)),
-          if (_controller.connectionFailure != null)
+          if (_connectionController.isOffline &&
+              (_controller.initialFailure == null ||
+                  _controller.items.isNotEmpty))
             _buildConnectionPanel(context),
         ],
       ),
@@ -370,6 +388,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
+          connectionController: _connectionController,
           path: folder.path,
           title: folder.name,
         ),
@@ -390,6 +409,7 @@ final class _BrowserPageState extends State<BrowserPage> {
           offlineTargetIndex: widget.offlineTargetIndex,
           offlineTargetQueueController: widget.offlineTargetQueueController,
           authController: widget.authController,
+          connectionController: _connectionController,
           path: widget.path,
         ),
       ),
@@ -423,25 +443,36 @@ final class _BrowserPageState extends State<BrowserPage> {
   }
 
   void _openExternally(CloudNode node) {
-    unawaited(
-      widget.openFileController
-          .open(node)
-          .then<void>(
-            (_) {},
-            onError: (Object _, StackTrace _) {
-              // Keep the UI boundary safe even if an injected implementation
-              // violates the controller's typed-failure contract.
-              _showOpenFailure();
-            },
-          ),
-    );
+    unawaited(_runExternalOpen(node));
+  }
+
+  Future<void> _runExternalOpen(CloudNode node) async {
+    bool? cacheHit;
+    try {
+      await widget.openFileController.open(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
+      await _refreshAfterForegroundSuccess(cacheHit);
+    } catch (_) {
+      // Keep the UI boundary safe even if an injected implementation violates
+      // the controller's typed-failure contract.
+      await _probeAfterForegroundFailure();
+      _showOpenFailure();
+    }
   }
 
   Future<void> _openInEditor(CloudNode node) async {
     final account = widget.authController.session?.email.trim().toLowerCase();
+    bool? cacheHit;
     try {
-      final prepared = await widget.openFileController.prepareForEditor(node);
+      final prepared = await widget.openFileController.prepareForEditor(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
       if (!mounted || prepared == null) return;
+      await _refreshAfterForegroundSuccess(cacheHit);
+      if (!mounted) return;
       final currentAccount = widget.authController.session?.email
           .trim()
           .toLowerCase();
@@ -461,8 +492,11 @@ final class _BrowserPageState extends State<BrowserPage> {
         ),
       );
     } on EditorPreparationFailure catch (failure) {
-      if (!failure.isQuiet) _showEditorPreparationFailure(failure);
+      if (failure.isQuiet) return;
+      await _probeAfterForegroundFailure();
+      _showEditorPreparationFailure(failure);
     } catch (_) {
+      await _probeAfterForegroundFailure();
       _showEditorPreparationFailure(
         const EditorPreparationFailure(
           EditorPreparationFailureType.service,
@@ -478,13 +512,34 @@ final class _BrowserPageState extends State<BrowserPage> {
     if (mounted) await _reloadAvailability();
   }
 
+  Future<void> _refreshAfterForegroundSuccess(bool? cacheHit) async {
+    if (!mounted || !_connectionController.isOffline || cacheHit != false) {
+      return;
+    }
+    try {
+      await _controller.refresh();
+    } catch (_) {
+      // Connectivity verification must not turn a successful foreground
+      // operation into a foreground failure.
+    }
+  }
+
+  Future<void> _probeAfterForegroundFailure() async {
+    if (!mounted) return;
+    try {
+      await _controller.refresh();
+    } catch (_) {
+      // Preserve the original foreground failure message.
+    }
+  }
+
   void _showEditorPreparationFailure(EditorPreparationFailure failure) {
     if (!mounted) return;
     final message = switch (failure.type) {
       EditorPreparationFailureType.oversize =>
-        'Текстовый файл превышает лимит 10 МиБ.',
+        'Текстовый файл превышает безопасный лимит редактора 2 МиБ. Используйте «Открыть вовне».',
       EditorPreparationFailureType.malformedUtf8 =>
-        'Файл содержит некорректный UTF-8.',
+        'Файл не удалось распознать как UTF-8 или Windows-1251.',
       EditorPreparationFailureType.integrity =>
         'Проверка содержимого файла не пройдена.',
       EditorPreparationFailureType.invalidResponse =>
@@ -511,19 +566,23 @@ final class _BrowserPageState extends State<BrowserPage> {
   }
 
   void _saveAs(CloudNode node) {
-    unawaited(
-      widget.openFileController
-          .saveAs(node)
-          .then<void>(
-            (_) {},
-            onError: (Object _, StackTrace _) {
-              // The controller suppresses stale attempts and picker
-              // cancellation. Only a current preparation/export failure
-              // reaches this generic presentation boundary.
-              _showSaveAsFailure();
-            },
-          ),
-    );
+    unawaited(_runSaveAs(node));
+  }
+
+  Future<void> _runSaveAs(CloudNode node) async {
+    bool? cacheHit;
+    try {
+      await widget.openFileController.saveAs(
+        node,
+        onSuccess: (value) => cacheHit = value,
+      );
+      await _refreshAfterForegroundSuccess(cacheHit);
+    } catch (_) {
+      // The controller suppresses stale attempts and picker cancellation. Only
+      // a current preparation/export failure reaches this generic boundary.
+      await _probeAfterForegroundFailure();
+      _showSaveAsFailure();
+    }
   }
 
   void _showSaveAsFailure() {

@@ -19,7 +19,9 @@ Future<void> main(List<String> arguments) async {
     exitCode = 2;
     return;
   }
-  if ((options.command == 'upload' || options.command == 'roundtrip') &&
+  if ((options.command == 'upload' ||
+          options.command == 'roundtrip' ||
+          options.command == 'tiny-roundtrip') &&
       !options.hasFlag('confirm-write')) {
     stderr.writeln(
       '${options.command} requires the explicit --confirm-write flag.',
@@ -74,6 +76,10 @@ Future<void> main(List<String> arguments) async {
     }
     if (options.command == 'conflict-roundtrip') {
       await _runConflictRoundtrip(client, session);
+      return;
+    }
+    if (options.command == 'tiny-roundtrip') {
+      await _runTinyRoundtrip(client, session);
       return;
     }
 
@@ -173,6 +179,7 @@ const _commands = <String>{
   'suite',
   'roundtrip',
   'conflict-roundtrip',
+  'tiny-roundtrip',
   'refresh',
   'csrf',
   'dispatcher',
@@ -509,6 +516,72 @@ Future<void> _runConflictRoundtrip(
   }
 }
 
+Future<void> _runTinyRoundtrip(
+  CloudProbeClient client,
+  OAuthSession session,
+) async {
+  await client.acquireCsrf(session);
+  final directory = await Directory.systemTemp.createTemp(
+    'easy-cloud-tiny-probe-',
+  );
+  final createdPaths = <String>{};
+  Object? operationError;
+  StackTrace? operationStack;
+  var cleanupFailed = false;
+  try {
+    final nonce = _conflictProbeNonce();
+    for (final size in const [0, 1, 2, 20, 21]) {
+      final fixture = File(
+        '${directory.path}${Platform.pathSeparator}$size.bin',
+      );
+      await fixture.writeAsBytes(
+        List<int>.generate(size, (index) => 0x41 + index % 26),
+      );
+      final expected = await _localIdentity(fixture);
+      final path = '/easy-cloud-tiny-probe-$nonce-$size.txt';
+      stdout.writeln('\n=== tiny upload: $size bytes ===');
+      final uploaded = size <= 20
+          ? expected
+          : await client.uploadContent(session, fixture);
+      _requireIdentityEquals(uploaded, expected, '$size-byte identity');
+      final added = await client.registerByIdentity(
+        session,
+        uploaded,
+        path,
+        conflict: FileConflict.strict,
+      );
+      _requireFileAddSuccess(added, '$size-byte registration');
+      createdPaths.add(path);
+      await _verifyRemoteMetadata(
+        client,
+        session,
+        path,
+        expected,
+        label: '$size-byte file',
+      );
+    }
+  } catch (error, stack) {
+    operationError = error;
+    operationStack = stack;
+  } finally {
+    cleanupFailed = await _cleanupConflictPaths(client, session, createdPaths);
+    try {
+      await directory.delete(recursive: true);
+    } catch (_) {
+      cleanupFailed = true;
+    }
+  }
+  if (operationError != null) {
+    Error.throwWithStackTrace(
+      operationError,
+      operationStack ?? StackTrace.current,
+    );
+  }
+  if (cleanupFailed) {
+    throw ProbeException('Tiny roundtrip finished with cleanup failures.');
+  }
+}
+
 Future<CloudFileIdentity> _localIdentity(File file) async => CloudFileIdentity(
   hash: await calculateCloudFileHash(file),
   size: await file.length(),
@@ -799,6 +872,7 @@ Commands:
   suite [search-query] [--path /scope] [--remote-file /file] [--limit N]
   roundtrip --confirm-write [--remote-file /unique-test-file.txt]
   conflict-roundtrip --confirm-write
+  tiny-roundtrip --confirm-write
   refresh
   csrf
   dispatcher

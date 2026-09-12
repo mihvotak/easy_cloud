@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../auth/presentation/auth_controller.dart';
 import '../../../cloud_mail/probe/cloud_hash.dart';
@@ -38,10 +39,15 @@ final class _EditorPageState extends State<EditorPage> {
   late final TextEditingController _textController;
   late EditorSaveBaseline _baseline;
   late List<int> _baselineBytes;
+  late String _baselineText;
+  late String _lastObservedText;
   late List<int> _encodedBytes;
   late bool _hasUtf8Bom;
+  late final EditorTextEncoding _originalEncoding;
+  EditorTextEncoding? _selectedEncoding;
   late bool _exactDirty;
   late bool _exactOversize;
+  bool _encodingUnsupported = false;
 
   EditorSaveCancellation? _saveCancellation;
   Timer? _encodingDebounceTimer;
@@ -71,12 +77,21 @@ final class _EditorPageState extends State<EditorPage> {
     super.initState();
     _baseline = widget.preparedFile.baseline;
     _baselineBytes = List<int>.unmodifiable(widget.preparedFile.bytes);
+    _baselineText = widget.preparedFile.text;
+    _lastObservedText = widget.preparedFile.text;
     _hasUtf8Bom = widget.preparedFile.hasUtf8Bom;
+    _originalEncoding = widget.preparedFile.encoding;
     _encodedBytes = _baselineBytes;
     _exactDirty = false;
     _exactOversize = _encodedBytes.length > editorMaxBytes;
-    _textController = TextEditingController(text: widget.preparedFile.text)
-      ..addListener(_onTextChanged);
+    _textController = TextEditingController.fromValue(
+      TextEditingValue(
+        text: widget.preparedFile.text,
+        selection: TextSelection.collapsed(
+          offset: widget.preparedFile.text.length,
+        ),
+      ),
+    )..addListener(_onTextChanged);
     widget.authController?.addListener(_onAuthChanged);
   }
 
@@ -107,6 +122,9 @@ final class _EditorPageState extends State<EditorPage> {
   }
 
   void _onTextChanged() {
+    final text = _textController.text;
+    if (text == _lastObservedText) return;
+    _lastObservedText = text;
     _encodingDebounceTimer?.cancel();
     _encodingDebounceTimer = null;
     final revision = ++_textRevision;
@@ -135,12 +153,25 @@ final class _EditorPageState extends State<EditorPage> {
   void _recomputeExactEncoding(int revision) {
     if (!mounted || revision != _textRevision) return;
     final wasOversize = _isOversize;
-    final next = List<int>.unmodifiable(_encodeExact(_textController.text));
+    late final List<int> next;
+    try {
+      next = List<int>.unmodifiable(_encodeExact(_textController.text));
+    } on FormatException {
+      _exactDirty = _textController.text != _baselineText;
+      _exactOversize = false;
+      _exactEncodingPending = false;
+      _encodingUnsupported = true;
+      setState(() {
+        _inlineMessage = _windows1251UnsupportedMessage;
+      });
+      return;
+    }
     if (!mounted || revision != _textRevision) return;
     _encodedBytes = next;
     _exactDirty = !listEquals(next, _baselineBytes);
     _exactOversize = next.length > editorMaxBytes;
     _exactEncodingPending = false;
+    _encodingUnsupported = false;
     setState(() {
       if (_exactOversize) {
         _inlineMessage = _oversizeMessage(next.length);
@@ -160,6 +191,7 @@ final class _EditorPageState extends State<EditorPage> {
     _exactDirty = !listEquals(next, _baselineBytes);
     _exactOversize = next.length > editorMaxBytes;
     _exactEncodingPending = false;
+    _encodingUnsupported = false;
     if (mounted) {
       setState(() {
         if (_exactOversize) {
@@ -172,8 +204,18 @@ final class _EditorPageState extends State<EditorPage> {
     return next;
   }
 
-  List<int> _encodeExact(String text) =>
-      (widget.exactEncoder ?? encodeEditorUtf8)(text, hasUtf8Bom: _hasUtf8Bom);
+  EditorTextEncoding get _effectiveEncoding =>
+      _selectedEncoding ?? _originalEncoding;
+
+  List<int> _encodeExact(String text) {
+    if (_effectiveEncoding == EditorTextEncoding.windows1251) {
+      return encodeWindows1251(text);
+    }
+    return (widget.exactEncoder ?? encodeEditorUtf8)(
+      text,
+      hasUtf8Bom: _hasUtf8Bom,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -258,6 +300,14 @@ final class _EditorPageState extends State<EditorPage> {
                     expands: true,
                     maxLines: null,
                     minLines: null,
+                    maxLength: inlineEditorMaxBytes,
+                    maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                    buildCounter: (
+                      context, {
+                      required currentLength,
+                      required isFocused,
+                      required maxLength,
+                    }) => null,
                     autofocus: true,
                     autocorrect: false,
                     enableSuggestions: false,
@@ -292,6 +342,23 @@ final class _EditorPageState extends State<EditorPage> {
   }
 
   Future<void> _save() async {
+    if (_encodingUnsupported &&
+        _selectedEncoding == EditorTextEncoding.windows1251) {
+      _selectedEncoding = null;
+    }
+    if (_originalEncoding == EditorTextEncoding.windows1251 &&
+        _selectedEncoding == null) {
+      _setConflictDialogShowing(true);
+      EditorTextEncoding? selected;
+      try {
+        selected = await _showEncodingDialog();
+      } finally {
+        if (mounted) _setConflictDialogShowing(false);
+      }
+      if (!mounted || selected == null) return;
+      _selectedEncoding = selected;
+      _hasUtf8Bom = false;
+    }
     await _saveWithChoice(EditorSaveChoice.unchanged);
   }
 
@@ -307,9 +374,23 @@ final class _EditorPageState extends State<EditorPage> {
         frozenTextRevision == _textRevision &&
         frozenText == _textController.text &&
         !_exactEncodingPending;
-    final bytes = canReuseFrozen
-        ? List<int>.unmodifiable(frozenBytes)
-        : _synchronizeExactEncoding();
+    late final List<int> bytes;
+    try {
+      bytes = canReuseFrozen
+          ? List<int>.unmodifiable(frozenBytes)
+          : _synchronizeExactEncoding();
+    } on FormatException {
+      if (mounted) {
+        setState(() {
+          _encodingUnsupported = true;
+          _inlineMessage = _windows1251UnsupportedMessage;
+          if (_originalEncoding == EditorTextEncoding.windows1251) {
+            _selectedEncoding = null;
+          }
+        });
+      }
+      return;
+    }
     if (!mounted) return;
     if (_isOversize || !_isDirty) {
       if (_isOversize) {
@@ -413,15 +494,25 @@ final class _EditorPageState extends State<EditorPage> {
       globalRevision: remote.globalRevision,
     );
     _baselineBytes = bytes;
+    _baselineText = savedText;
     _lastSaveResult = result;
 
     var currentBytes = bytes;
     var currentDirty = false;
     var currentOversize = bytes.length > editorMaxBytes;
     if (currentTextChanged) {
-      currentBytes = List<int>.unmodifiable(_encodeExact(_textController.text));
-      currentDirty = !listEquals(currentBytes, _baselineBytes);
-      currentOversize = currentBytes.length > editorMaxBytes;
+      try {
+        currentBytes = List<int>.unmodifiable(
+          _encodeExact(_textController.text),
+        );
+        currentDirty = !listEquals(currentBytes, _baselineBytes);
+        currentOversize = currentBytes.length > editorMaxBytes;
+        _encodingUnsupported = false;
+      } on FormatException {
+        currentDirty = true;
+        currentOversize = false;
+        _encodingUnsupported = true;
+      }
     }
     _encodedBytes = currentBytes;
     _exactDirty = currentDirty;
@@ -431,6 +522,8 @@ final class _EditorPageState extends State<EditorPage> {
       setState(() {
         _inlineMessage = result.isPartialSuccess
             ? 'Файл сохранён в облаке, но локальная офлайн-связь не обновлена.'
+            : _encodingUnsupported
+            ? _windows1251UnsupportedMessage
             : currentOversize
             ? _oversizeMessage(currentBytes.length)
             : null;
@@ -488,6 +581,30 @@ final class _EditorPageState extends State<EditorPage> {
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Отмена'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<EditorTextEncoding?> _showEncodingDialog() {
+    return showDialog<EditorTextEncoding>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Кодировка файла'),
+        content: const Text(
+          'Сейчас файл в кодировке Windows-1251. Сохранить его в ней же или поменять на UTF-8?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(EditorTextEncoding.windows1251),
+            child: const Text('Windows-1251'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(EditorTextEncoding.utf8),
+            child: const Text('UTF-8'),
           ),
         ],
       ),
@@ -594,6 +711,9 @@ String _basename(String path) {
 
 String _oversizeMessage(int bytes) =>
     'Размер текста: $bytes байт. Лимит встроенного редактора — $editorMaxBytes байт (10 МиБ).';
+
+const _windows1251UnsupportedMessage =
+    'Текст содержит символы, которых нет в Windows-1251. Сохраните файл как UTF-8.';
 
 String _editorSavePhaseLabel(EditorSavePhase phase) => switch (phase) {
   EditorSavePhase.checkingConflict => 'Проверка изменений в облаке…',

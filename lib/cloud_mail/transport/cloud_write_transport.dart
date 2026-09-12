@@ -193,7 +193,12 @@ final class CloudMailWriteTransport implements EditorWriteTransport {
     );
     _validateSource(source, expectedSize);
 
-    CloudUploadIdentity? identity;
+    // For 0..20 bytes the Mail.ru content hash is the complete payload padded
+    // to 20 bytes. file/add can reconstruct these objects directly, while the
+    // upload shard rejects or mishandles their short raw PUT on some shards.
+    CloudUploadIdentity? identity = expectedSize <= 20
+        ? CloudUploadIdentity(hash: hash, size: expectedSize)
+        : null;
     var registerPath = path;
     while (true) {
       cancellation?.throwIfCancelled();
