@@ -302,12 +302,13 @@ final class _EditorPageState extends State<EditorPage> {
                     minLines: null,
                     maxLength: inlineEditorMaxBytes,
                     maxLengthEnforcement: MaxLengthEnforcement.enforced,
-                    buildCounter: (
-                      context, {
-                      required currentLength,
-                      required isFocused,
-                      required maxLength,
-                    }) => null,
+                    buildCounter:
+                        (
+                          context, {
+                          required currentLength,
+                          required isFocused,
+                          required maxLength,
+                        }) => null,
                     autofocus: true,
                     autocorrect: false,
                     enableSuggestions: false,

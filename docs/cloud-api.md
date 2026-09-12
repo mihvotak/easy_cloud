@@ -26,6 +26,7 @@ application.
 | 2026-09-09 | `folder/find` recheck | Production API v2, root scope, one-character query, limit 10 | HTTP 200; folder-like `body.list` returned a result. Both OAuth access token and legacy CSRF query token were accepted. |
 | 2026-09-09 | Upload and `file/add` | Production upload shard and API v2 | Raw PUT returned HTTP 201 and a 40-character hash; strict registration and subsequent stat succeeded. |
 | 2026-09-11 | `file/add` conflicts | Production API v2, dedicated test account | `strict` preserved the existing file, `rewrite` replaced it and created history, and `rename` returned an adjacent ` (1)` path; every result was stat-verified and cleanup succeeded. |
+| 2026-09-13 | Tiny upload boundary | Production API v2 and upload shard, dedicated test account | Direct `file/add` with padded hashes was stat-verified for 0, 1, 2, and 20 bytes; 21 bytes used shard PUT plus registration. All generated paths were removed. |
 | 2026-09-09 | File stat and history | Production API v2 | Stat returned size/hash/mtime; history returned `uid`, `time`, `name`, `path`, and `size`, but no hash or revision for this account. |
 | 2026-09-09 | Range and download | Production download shard | `Range: bytes=0-31` returned HTTP 206, `Accept-Ranges: bytes`, and valid `Content-Range`; complete content passed size and cloud-hash checks. |
 | 2026-09-09 | File removal | Production API v2 | `file/remove` moved the generated probe file to trash. |

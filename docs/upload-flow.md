@@ -86,7 +86,9 @@ remote paths successfully.
 ## Live checklist
 
 - [x] `/u` response grammar and upload shard extraction confirmed.
-- [ ] Empty and small uploads tested.
+- [x] Empty and small uploads tested live on 2026-09-13: direct `file/add`
+  succeeded and was stat-verified for 0, 1, 2, and 20 bytes; 21 bytes used the
+  normal shard PUT and registration flow.
 - [x] The client registers 0-20 byte payloads directly from their
   self-contained padded cloud hash instead of sending a short shard PUT.
 - [x] Upload response hash matches the local hash for the fixture.

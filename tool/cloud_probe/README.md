@@ -23,6 +23,8 @@ export CLOUD_MAIL_APP_PASSWORD='application-password'
 dart run tool/cloud_probe/cloud_probe.dart dispatcher
 ```
 
+The aliases `MAILRU_CLOUD_EMAIL` and `MAILRU_CLOUD_PASS` are also accepted.
+
 Prefer `suite` for initial contract verification. It asks for credentials once
 and runs only read-only checks: login, refresh, CSRF, dispatchers, root listing,
 and legacy search. A failed optional capability is reported without preventing

@@ -819,6 +819,7 @@ Future<void> _runOptionalCheck(
   final email = options.email ?? _prompt('Mail.ru email: ');
   final password =
       Platform.environment['CLOUD_MAIL_APP_PASSWORD'] ??
+      Platform.environment['MAILRU_CLOUD_PASS'] ??
       _promptSecret('Mail.ru application password: ');
   if (email.trim().isEmpty || password.isEmpty) {
     throw ProbeException('Email and application password are required.');

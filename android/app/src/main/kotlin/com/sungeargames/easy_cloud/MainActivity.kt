@@ -271,8 +271,9 @@ class MainActivity : FlutterFragmentActivity() {
 
     /**
      * Accept only the exact final object layout produced by the CAS cache.
-     * Canonical-path equality rejects symlinks in every path component, while
-     * the shape checks reject traversal, parts and arbitrary app files.
+     * Validate the canonical path because Android may expose filesDir through
+     * an OEM-dependent alias. The shape checks reject traversal, parts and
+     * arbitrary app files even when the raw path contains such an alias.
      */
     private fun validateCasObject(rawPath: String): File {
         if (rawPath.isBlank() || rawPath.indexOf('\u0000') >= 0) {
@@ -285,9 +286,6 @@ class MainActivity : FlutterFragmentActivity() {
             throw InvalidOpenFileRequest()
         }
         val canonical = input.canonicalFile
-        if (canonical.path != input.absolutePath) {
-            throw InvalidOpenFileRequest()
-        }
 
         val filesRoot = filesDir.canonicalFile
         val rootPrefix = filesRoot.path + File.separator

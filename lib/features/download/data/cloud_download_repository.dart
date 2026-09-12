@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../../../cloud_mail/api/cloud_mail_api.dart';
 import '../../../cloud_mail/probe/cloud_hash.dart';
+import '../../../core/errors/cloud_failure.dart';
 import '../../../features/auth/application/auth_repository.dart';
 import '../../../features/auth/domain/auth_failure.dart';
 import '../../../features/auth/domain/cloud_session.dart';
@@ -1321,7 +1322,6 @@ final class _DownloadOperation {
         throw const DownloadCancelled();
       }
 
-      final metadata = _metadataForTargetMembership(current);
       // Keep the path lease even for a cache hit: the object can become
       // corrupt between a preliminary check and the actual read/repair.
       final releasePath = await coordinator.acquire(
@@ -1330,24 +1330,62 @@ final class _DownloadOperation {
         kind: CloudCacheLockKind.path,
       );
       try {
-        prepared = await _runWithMetadata(
-          scope,
-          cacheOverride: cache,
-          remoteNode: _nodeForTargetMembership(current),
-          metadata: metadata,
-          existingBinding: null,
-          openTargetMembership: current,
-          repairOpenTargetMembership: false,
-          onCacheMiss: () async {
-            // A target membership is an offline hint only. If its CAS object is
-            // absent or corrupt, obtain fresh metadata before repairing the
-            // membership through target ownership semantics.
+        late final CloudNode remoteNode;
+        late final _DownloadMetadata metadata;
+        var repairOpenTargetMembership = false;
+        Future<_DownloadMetadataResolution> Function()? onCacheMiss;
+        try {
+          // Revalidate only after the target and path leases are held. This
+          // keeps the authoritative replacement and its ownership hand-off in
+          // the same target -> path -> hash critical section.
+          final freshNode = await _statAndValidate(scope, node.path);
+          final freshMetadata = _validatedMetadata(freshNode);
+          remoteNode = freshNode;
+          metadata = freshMetadata;
+          repairOpenTargetMembership = _targetMembershipNeedsRepair(
+            current,
+            freshNode,
+            freshMetadata,
+          );
+
+          // Reuse the successful stat result if the verified object is absent
+          // or corrupt. A second stat is unnecessary and would widen the
+          // replacement race; the retry still forces target ownership
+          // publication through _indexTargetFile.
+          onCacheMiss = () async => _DownloadMetadataResolution(
+            remoteNode: freshNode,
+            metadata: freshMetadata,
+          );
+        } on CloudFailure catch (failure) {
+          if (failure.type != CloudFailureType.network &&
+              failure.type != CloudFailureType.timeout &&
+              failure.type != CloudFailureType.service) {
+            rethrow;
+          }
+
+          // Connectivity/service failures preserve the old verified target
+          // object for offline opening. A cache miss/corruption can still use
+          // the existing repair path, which will retry stat before download.
+          remoteNode = _nodeForTargetMembership(current);
+          metadata = _metadataForTargetMembership(current);
+          onCacheMiss = () async {
             final freshNode = await _statAndValidate(scope, node.path);
             return _DownloadMetadataResolution(
               remoteNode: freshNode,
               metadata: _validatedMetadata(freshNode),
             );
-          },
+          };
+        }
+
+        prepared = await _runWithMetadata(
+          scope,
+          cacheOverride: cache,
+          remoteNode: remoteNode,
+          metadata: metadata,
+          existingBinding: null,
+          openTargetMembership: current,
+          repairOpenTargetMembership: repairOpenTargetMembership,
+          onCacheMiss: onCacheMiss,
         );
       } finally {
         releasePath();
@@ -1524,6 +1562,20 @@ final class _DownloadOperation {
       return false;
     }
   }
+
+  bool _targetMembershipNeedsRepair(
+    OfflineTargetFileRecord membership,
+    CloudNode freshNode,
+    _DownloadMetadata metadata,
+  ) =>
+      membership.hash != metadata.hash ||
+      membership.size != metadata.size ||
+      (freshNode.modifiedAt != null &&
+          membership.modifiedAt != freshNode.modifiedAt) ||
+      (freshNode.revision != null &&
+          membership.revision != freshNode.revision) ||
+      (freshNode.globalRevision != null &&
+          membership.globalRevision != freshNode.globalRevision);
 
   Future<CloudNode> _statAndValidate(
     _DownloadSessionScope scope,

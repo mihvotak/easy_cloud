@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:easy_cloud/cloud_mail/probe/cloud_hash.dart';
 import 'package:easy_cloud/cloud_mail/api/cloud_mail_api.dart';
 import 'package:easy_cloud/cloud_mail/transport/cloud_transport.dart';
+import 'package:easy_cloud/core/errors/cloud_failure.dart';
 import 'package:easy_cloud/features/auth/application/auth_repository.dart';
 import 'package:easy_cloud/features/auth/data/cloud_auth_api.dart';
 import 'package:easy_cloud/features/auth/data/session_store.dart';
@@ -711,7 +712,12 @@ void main() {
         ),
       );
       await _writeObject(root, 'test@mail.ru', hash, payload);
-      final statTransport = _StatTransport(const []);
+      final statTransport = _StatTransport(
+        const [],
+        failures: [
+          CloudFailure(CloudFailureType.network, 'network unavailable'),
+        ],
+      );
       final downloadTransport = _DownloadTransport(const []);
       final repository = _repository(
         root: root,
@@ -727,11 +733,91 @@ void main() {
           .result;
 
       expect(await result.readAsBytes(), payload);
-      expect(statTransport.calls, 0);
+      expect(statTransport.calls, 1);
       expect(downloadTransport.calls, 0);
       expect(index.upsertCalls, 0);
       expect(index.targetReadyCalls, 0);
       expect(await index.hasTransientReference('test@mail.ru', hash), isTrue);
+    },
+  );
+
+  test(
+    'revalidates an inherited target replacement at the same path',
+    () async {
+      final oldPayload = utf8.encode('inherited old bytes');
+      final freshPayload = utf8.encode('inherited new bytes');
+      expect(oldPayload.length, freshPayload.length);
+      final oldHash = calculateCloudHash(oldPayload);
+      final freshHash = calculateCloudHash(freshPayload);
+      final modifiedAt = DateTime.utc(2025, 6, 7, 8, 9, 10);
+      final root = await Directory.systemTemp.createTemp('easy-cloud-open');
+      addTearDown(() => root.delete(recursive: true));
+      final auth = await _authenticatedRepository();
+      addTearDown(auth.close);
+      final index = _MemoryOfflineFileIndex();
+      await index.upsertTarget('test@mail.ru', _targetRecord('/target'));
+      await index.upsertTargetFile(
+        'test@mail.ru',
+        _targetFileRecord(
+          '/target',
+          '/target/inherited.txt',
+          hash: oldHash,
+          size: oldPayload.length,
+          readiness: OfflineReadiness.ready,
+        ),
+      );
+      await _writeObject(root, 'test@mail.ru', oldHash, oldPayload);
+      final statTransport = _StatTransport([
+        _file(
+          '/target/inherited.txt',
+          freshPayload.length,
+          freshHash,
+          modifiedAt: modifiedAt,
+          revision: 'fresh-revision',
+          globalRevision: 'fresh-global-revision',
+        ),
+      ]);
+      final downloadTransport = _DownloadTransport(freshPayload);
+      final repository = _repository(
+        root: root,
+        auth: auth,
+        statTransport: statTransport,
+        downloadTransport: downloadTransport,
+        index: index,
+      );
+      addTearDown(repository.close);
+
+      final result = await repository
+          .startOpen(_node('/target/inherited.txt'))
+          .result;
+
+      expect(await result.readAsBytes(), freshPayload);
+      expect(statTransport.paths, ['/target/inherited.txt']);
+      expect(downloadTransport.calls, 1);
+      expect(index.upsertCalls, 0);
+      expect(index.targetReadyCalls, 1);
+      final membership = await index.getTargetFile(
+        'test@mail.ru',
+        '/target',
+        '/target/inherited.txt',
+      );
+      expect(membership?.readiness, OfflineReadiness.ready);
+      expect(membership?.hash, freshHash);
+      expect(membership?.size, freshPayload.length);
+      expect(membership?.modifiedAt, modifiedAt);
+      expect(membership?.revision, 'fresh-revision');
+      expect(membership?.globalRevision, 'fresh-global-revision');
+      expect(
+        await (await ContentAddressedFileCache(
+          root: root,
+          email: 'test@mail.ru',
+        ).objectFile(oldHash)).exists(),
+        isTrue,
+      );
+      expect(
+        await index.hasTransientReference('test@mail.ru', freshHash),
+        isTrue,
+      );
     },
   );
 
@@ -3077,9 +3163,10 @@ final class _AuthApi implements AuthApi {
 }
 
 final class _StatTransport implements CloudTransport {
-  _StatTransport(this.nodes);
+  _StatTransport(this.nodes, {this.failures = const []});
 
   final List<CloudNode> nodes;
+  final List<Object> failures;
   final paths = <String>[];
   int calls = 0;
   bool closed = false;
@@ -3093,7 +3180,9 @@ final class _StatTransport implements CloudTransport {
     expect(endpoint, 'file');
     expect(includeCsrfQuery, isFalse);
     paths.add(query['home']!);
-    final node = nodes[calls++];
+    final call = calls++;
+    if (call < failures.length) throw failures[call];
+    final node = nodes[call - failures.length];
     final body = <String, Object?>{
       'home': node.path,
       'name': node.name,

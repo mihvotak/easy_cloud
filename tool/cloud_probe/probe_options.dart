@@ -81,7 +81,9 @@ final class ProbeOptions {
 
   String? get email {
     final configured =
-        values['email'] ?? Platform.environment['CLOUD_MAIL_EMAIL'];
+        values['email'] ??
+        Platform.environment['CLOUD_MAIL_EMAIL'] ??
+        Platform.environment['MAILRU_CLOUD_EMAIL'];
     if (configured != null && configured.trim().isNotEmpty) return configured;
 
     final accountFile = File('.cloud_probe_account');
